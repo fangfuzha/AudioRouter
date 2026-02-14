@@ -1,0 +1,131 @@
+# Release 工作流：为 Windows 生成并发布 NSIS (.exe) 安装包
+# 触发：push 到语义化 tag（例如 v1.2.3）会创建 GitHub Release 并上传安装包
+# 注意：签名由可选的 PFX secrets 控制（若未提供则上传未签名的 exe）
+name: "Release — Windows"
+
+# 以 v 开头的 tag 触发此  工作流
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    # 主任务：在 Windows runner 上构建、签名并发布可安装的 .exe
+    name: Build & release (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        # 检出仓库代码（包含 tags），后续步骤依赖于此
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        # 安装 Node.js（用于构建前端与运行 npm 脚本）
+        uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+
+      - name: Cache node modules
+        # 缓存前端依赖目录，加快后续构建速度（基于 package-lock.json 哈希）
+        uses: actions/cache@v4
+        with:
+          path: AudioRouter/node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/AudioRouter/package-lock.json') }}
+
+      - name: Install frontend dependencies
+        # 使用 npm ci 在 CI 中进行可复现的依赖安装
+        run: npm ci --prefix AudioRouter
+
+      - name: Build frontend
+        # 构建前端静态资源，输出到 AudioRouter/dist（供 tauri 打包使用）
+        run: npm run build --prefix AudioRouter
+
+      - name: Setup Rust toolchain
+        # 安装并激活 Rust toolchain（用于构建 tauri 后端及打包）
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Cache cargo registry
+        # 缓存 Cargo registry/git，加速 Rust 依赖恢复
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build artifacts (root target)
+        # 缓存仓库根目录的 `target/`（跨 workspace）以加速后续构建（基于 workspace Cargo.lock）
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-
+
+      - name: Build Tauri app (Windows)
+        # 使用 tauri CLI 在 Windows 上打包应用（生成 NSIS .exe 安装器）
+        run: npm run tauri build --prefix AudioRouter
+
+      - name: Install llvm tools (needed by cargo-bloat)
+        # 为 cargo-bloat 安装 llvm-tools-preview（Windows runner）
+        run: rustup component add llvm-tools-preview
+
+      - name: Install cargo-bloat
+        # 安装 cargo-bloat 用于检查二进制体积
+        run: cargo install cargo-bloat --locked
+
+      - name: Run cargo-bloat (生成报告并上传)
+        # 在 Windows runner 上分析 release 二进制大小（非阻塞）
+        working-directory: AudioRouter/src-tauri
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          cargo bloat --release --crates | Tee-Object -FilePath cargo-bloat.txt
+
+      - name: Upload cargo-bloat report
+        # 上传分析报告作为 artifact（不会阻塞主流程）
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-bloat-report
+          path: AudioRouter/src-tauri/cargo-bloat.txt
+
+      - name: Decode & import PFX (only if provided)
+        # 如果设置了 PFX secrets，则解码并导入到 runner 的证书存储，以便后续使用 signtool 签名
+        if: ${{ secrets.WINDOWS_SIGN_CERT && secrets.WINDOWS_SIGN_PASSWORD }}
+        shell: pwsh
+        run: |
+          Write-Host "Decoding PFX from secret and writing to runner temp"
+          [System.IO.File]::WriteAllBytes("$env:RUNNER_TEMP\codesign.pfx", [System.Convert]::FromBase64String('${{ secrets.WINDOWS_SIGN_CERT }}'))
+          Write-Host "Importing PFX into personal cert store"
+          certutil -f -p "${{ secrets.WINDOWS_SIGN_PASSWORD }}" -importpfx "$env:RUNNER_TEMP\codesign.pfx"
+
+      - name: Sign Windows installers (only if cert provided)
+        # 对生成的 .exe 进行代码签名（使用 signtool + 时间戳，提升下载/执行时的信任度）
+        if: ${{ secrets.WINDOWS_SIGN_CERT && secrets.WINDOWS_SIGN_PASSWORD }}
+        shell: pwsh
+        run: |
+          $bundles = Join-Path -Path "src-tauri" -ChildPath "target\release\bundle"
+          Write-Host "Searching for installers under: $bundles"
+          $files = Get-ChildItem -Path $bundles -Recurse -Include *.exe -ErrorAction SilentlyContinue
+          if (-not $files) { Write-Host "No installers found to sign"; exit 0 }
+          foreach ($f in $files) {
+            Write-Host "Signing $($f.FullName)"
+            signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f "$env:RUNNER_TEMP\codesign.pfx" /p "${{ secrets.WINDOWS_SIGN_PASSWORD }}" $f.FullName
+          }
+
+      - name: Create GitHub Release and upload installers
+        # 自动创建与更新 GitHub Release，并把所有 .exe 上传为 Release 资产
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ github.ref }}
+          files: |
+            src-tauri/target/release/bundle/**/*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
