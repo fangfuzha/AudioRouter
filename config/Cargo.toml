@@ -1,0 +1,16 @@
+[package]
+name = "config"
+version = "0.1.0"
+edition = "2024"
+authors = ["Multi Audio Output <devs>"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.7"
+anyhow = "1.0"
+thiserror = "1.0"
+parking_lot = "0.12"
+specta = { version = "=2.0.0-rc.22", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3.3"

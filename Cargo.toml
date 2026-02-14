@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["audio_core", "config", "AudioRouter/src-tauri"]
+
+# Release 编译优化：优先提高运行时性能并减小产物体积
+# - opt-level=3: 最大化运行时性能
+# - lto=true + codegen-units=1: 更好的跨模块优化
+# - panic = "abort": 减少二进制大小（如果不需要栈展开）
+# - debug = 0 / incremental = false: 消除调试信息并保证可重复构建
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = 0
+incremental = false
+overflow-checks = false

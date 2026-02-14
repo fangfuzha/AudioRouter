@@ -1,0 +1,3 @@
+- [com_worker.rs](audio_core/src/com_worker.rs) — 存在异步与同步问题待解决（简述：无法在异步环境下新建 `ComWorker` 示例）。
+- 更新逻辑
+- icon 替换

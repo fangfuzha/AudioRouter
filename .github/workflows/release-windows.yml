@@ -1,0 +1,189 @@
+# Release 工作流：为 Windows 生成并发布 NSIS (.exe) 安装包
+# 触发：push 到语义化 tag（例如 v1.2.3）会创建 GitHub Release 并上传安装包
+# 注意：签名由可选的 PFX secrets 控制（若未提供则上传未签名的 exe）
+name: "Release — Windows"
+
+# 以 v 开头的 tag 触发此  工作流
+on:
+  push:
+    tags:
+      - "v*"
+  # 允许手动触发（在 Actions 页点击 "Run workflow"）
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的 tag，例如 v1.0.0；如不填写则使用推送的 tag。"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    # 主任务：在 Windows runner 上构建、签名并发布可安装的 .exe
+    name: Build & release (Windows)
+    runs-on: windows-latest
+    # 把 secrets 映射到 job-level env，再在 if 中引用 env（避免解析时的 schema 验证错误）
+    env:
+      WINDOWS_SIGN_CERT: ${{ secrets.WINDOWS_SIGN_CERT }}
+      WINDOWS_SIGN_PASSWORD: ${{ secrets.WINDOWS_SIGN_PASSWORD }}
+
+    steps:
+      - name: Checkout repository
+        # 检出仓库代码（包含 tags），后续步骤依赖于此
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve release tag
+        # 解析并校验发布 tag（优先使用 workflow_dispatch 输入；否则使用触发的 git tag）
+        shell: pwsh
+        run: |
+          if ('${{ github.event.inputs.tag }}' -ne '') {
+            $tag = '${{ github.event.inputs.tag }}'
+          } elseif ('${{ github.ref }}' -like 'refs/tags/*') {
+            $tag = '${{ github.ref_name }}'
+          } else {
+            Write-Error "No tag provided. 手动运行请在 'Run workflow' 填写 tag；自动触发请用 tag 推送。"
+            exit 1
+          }
+
+          # 基本校验：必须以 v 开头并跟数字（例如 v1.2.3 或 v1.2.3-rc）
+          if ($tag -notmatch '^[vV]\d') {
+            Write-Error "Invalid tag format: $tag. Tag 必须以 'v' 开头并跟随版本号，例如 v1.2.3"
+            exit 1
+          }
+
+          echo "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
+
+      - name: Setup Node.js
+        # 安装 Node.js（用于构建前端与运行 npm 脚本）
+        uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+
+      - name: Cache node modules
+        # 缓存前端依赖目录，加快后续构建速度（基于 package-lock.json 哈希）
+        uses: actions/cache@v4
+        with:
+          path: AudioRouter/node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/AudioRouter/package-lock.json') }}
+
+      - name: Install frontend dependencies
+        # 使用 npm ci 在 CI 中进行可复现的依赖安装
+        run: npm ci --prefix AudioRouter --no-fund
+
+      - name: Setup Rust toolchain
+        # 安装并激活 Rust toolchain（用于构建 tauri 后端及打包）
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Cache cargo registry
+        # 缓存 Cargo registry/git，加速 Rust 依赖恢复
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build artifacts (root target)
+        # 缓存仓库根目录的 `target/`（跨 workspace）以加速后续构建（基于 workspace Cargo.lock）
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-
+
+      - name: Build Tauri app (Windows)
+        # 使用 tauri CLI 在 Windows 上打包应用（生成 NSIS .exe 安装器）
+        run: npm run 'tauri build' --prefix AudioRouter
+
+      - name: Decode & import PFX (only if provided)
+        # 如果设置了 PFX secrets，则解码并导入到 runner 的证书存储，以便后续使用 signtool 签名
+        if: ${{ env.WINDOWS_SIGN_CERT && env.WINDOWS_SIGN_PASSWORD }}
+        shell: pwsh
+        run: |
+          Write-Host "Decoding PFX from secret and writing to runner temp"
+          [System.IO.File]::WriteAllBytes("$env:RUNNER_TEMP\codesign.pfx", [System.Convert]::FromBase64String('${{ env.WINDOWS_SIGN_CERT }}'))
+          Write-Host "Importing PFX into personal cert store"
+          certutil -f -p "${{ env.WINDOWS_SIGN_PASSWORD }}" -importpfx "$env:RUNNER_TEMP\codesign.pfx"
+
+      - name: Sign Windows installers (only if cert provided)
+        # 对生成的 .exe 进行代码签名（使用 signtool + 时间戳，提升下载/执行时的信任度）
+        if: ${{ env.WINDOWS_SIGN_CERT && env.WINDOWS_SIGN_PASSWORD }}
+        shell: pwsh
+        run: |
+          $bundles = Join-Path -Path "target" -ChildPath "release\\bundle"
+          Write-Host "Searching for installers under: $bundles"
+          $files = Get-ChildItem -Path $bundles -Recurse -Include *.exe -ErrorAction SilentlyContinue
+          if (-not $files) { Write-Host "No installers found to sign"; exit 0 }
+          foreach ($f in $files) {
+            Write-Host "Signing $($f.FullName)"
+            signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f "$env:RUNNER_TEMP\codesign.pfx" /p "${{ env.WINDOWS_SIGN_PASSWORD }}" $f.FullName
+          }
+
+      - name: Check existing GitHub Release by tag
+        # 如果该 tag 已存在则记录 release id 以便后续上传资产（不删除 release）
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $repo = "${{ github.repository }}"
+          $tag = "${{ env.RELEASE_TAG }}"
+          $url = "https://api.github.com/repos/$repo/releases/tags/$tag"
+          try {
+            $release = Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:GITHUB_TOKEN"; "User-Agent" = "gh-action" } -Uri $url -ErrorAction Stop
+            echo "RELEASE_ID=$($release.id)" >> $env:GITHUB_ENV
+            echo "Found existing release id=$($release.id)"
+          } catch {
+            Write-Host "No existing release for $tag (will create a new one)"
+          }
+
+      - name: Upload installers to existing Release (if present)
+        if: ${{ env.RELEASE_ID != '' }}
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $repo = "${{ github.repository }}"
+          $releaseId = $env:RELEASE_ID
+          $assetsUrl = "https://api.github.com/repos/$repo/releases/$releaseId/assets"
+
+          $bundleDir = Join-Path -Path "target" -ChildPath "release\bundle"
+          Write-Host "Uploading installers from: $bundleDir to release id=$releaseId"
+
+          $files = Get-ChildItem -Path $bundleDir -Recurse -Include *.exe -File -ErrorAction SilentlyContinue
+          if (-not $files) { Write-Host "No installer files found to upload"; exit 0 }
+
+          # 获取已有资产并删除同名项以便覆盖
+          $existingAssets = Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:GITHUB_TOKEN"; "User-Agent" = "gh-action" } -Uri $assetsUrl
+
+          foreach ($f in $files) {
+            $name = $f.Name
+            $existing = $existingAssets | Where-Object { $_.name -eq $name }
+            if ($existing) {
+              Write-Host "Deleting existing asset: $name (id=$($existing.id))"
+              Invoke-RestMethod -Method Delete -Headers @{ Authorization = "Bearer $env:GITHUB_TOKEN"; "User-Agent" = "gh-action" } -Uri "https://api.github.com/repos/$repo/releases/assets/$($existing.id)"
+            }
+
+            $uploadUrl = "https://uploads.github.com/repos/$repo/releases/$releaseId/assets?name=$name"
+            Write-Host "Uploading $name to $uploadUrl"
+            Invoke-RestMethod -Method Post -Uri $uploadUrl -Headers @{ Authorization = "Bearer $env:GITHUB_TOKEN"; "User-Agent" = "gh-action"; "Content-Type" = "application/octet-stream" } -InFile $f.FullName
+            Write-Host "Uploaded $name"
+          }
+
+      - name: Create GitHub Release and upload installers
+        if: ${{ env.RELEASE_ID == '' }}
+        # 自动创建与更新 GitHub Release，并把所有 .exe 上传为 Release 资产
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ env.RELEASE_TAG }}
+          files: |
+            target/release/bundle/**/*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
