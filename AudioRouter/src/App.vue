@@ -27,6 +27,11 @@ const sorted_target_devices = computed<UiDataTargetDevice[]>(() =>
     .sort((a, b) => a.name.localeCompare(b.name)),
 );
 
+// 用于渲染目标设备列表的计算属性，会排除当前选中的源设备
+const filtered_target_devices = computed<UiDataTargetDevice[]>(() =>
+  sorted_target_devices.value.filter((d) => d.id !== selectedSource.value),
+);
+
 const isRunning = ref(false);
 const statusText = ref(t("StatusReady"));
 const showSettings = ref(false);
@@ -69,7 +74,7 @@ async function refreshUI() {
 }
 
 async function startRouting() {
-  const targets = target_devices.value
+  const targets = filtered_target_devices.value
     .filter((d) => d.enabled)
     .map((d) => [d.id, d.mix_mode] as [string, ChannelMixMode]);
 
@@ -115,7 +120,9 @@ onMounted(async () => {
   // listen to routing start/stop events from backend
   unlistenStart = await listen("routing-started", () => {
     isRunning.value = true;
-    const runningCount = target_devices.value.filter((d) => d.enabled).length;
+    const runningCount = filtered_target_devices.value.filter(
+      (d) => d.enabled,
+    ).length;
     statusText.value = t("RunningOn", { count: runningCount });
   });
   unlistenStop = await listen("routing-stopped", () => {
@@ -162,7 +169,7 @@ onUnmounted(() => {
           class="flex-1 overflow-y-auto pr-2 flex flex-col gap-3 custom-scrollbar"
         >
           <DeviceCard
-            v-for="d in sorted_target_devices"
+            v-for="d in filtered_target_devices"
             :key="d.id"
             :id="d.id"
             :name="d.name"
