@@ -6,7 +6,7 @@
 
 use crate::utils::{map_state, win_helpers};
 use anyhow::{Result, anyhow};
-use callcomapi_macros::with_com;
+use callcomapi::with_com;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;

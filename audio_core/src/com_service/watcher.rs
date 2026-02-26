@@ -6,7 +6,7 @@
 
 use crate::utils::ComSend;
 use anyhow::{Result, anyhow};
-use callcomapi_macros::with_com;
+use callcomapi::with_com;
 use windows::Win32::Media::Audio::{
     IMMDeviceEnumerator, IMMNotificationClient, MMDeviceEnumerator,
 };

@@ -3,7 +3,7 @@ use crate::com_service::device::get_output_device_by_id_internal;
 use crate::router::RouterConfig;
 use crate::utils::ComSend;
 use anyhow::{Result, anyhow};
-use callcomapi_macros::with_com;
+use callcomapi::with_com;
 use std::sync::Arc;
 use windows::Win32::Media::Audio::{IAudioCaptureClient, WAVEFORMATEX};
 use windows::Win32::Media::Audio::{IAudioClient, IAudioRenderClient, IMMDevice};
