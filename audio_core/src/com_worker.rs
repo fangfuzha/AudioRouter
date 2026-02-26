@@ -32,8 +32,7 @@
 //! TODO:如何既能满足COM apartment 的线程模型要求,有能提供异步和同步api,还能再异步线程新建ComWorker对象?
 
 use anyhow::{Result, anyhow};
-use futures::channel::{mpsc, oneshot};
-use futures::{SinkExt, StreamExt, executor};
+use callcomapi_macros::com_thread;
 use once_cell::sync::Lazy;
 use std::any::Any;
 
@@ -110,268 +109,117 @@ pub enum Apartment {
     STA,
 }
 
+/// Helper function to dispatch sync COM tasks to a dedicated thread based on apartment.
+#[com_thread(STA)]
+fn dispatch_sta_sync(
+    task: Box<dyn FnOnce() -> Result<ComSend<Box<dyn Any>>> + Send>,
+) -> Result<ComSend<Box<dyn Any>>> {
+    task()
+}
+
+#[com_thread(MTA)]
+fn dispatch_mta_sync(
+    task: Box<dyn FnOnce() -> Result<ComSend<Box<dyn Any>>> + Send>,
+) -> Result<ComSend<Box<dyn Any>>> {
+    task()
+}
+
+/// Helper function to dispatch async COM tasks to a dedicated thread based on apartment.
+#[com_thread(STA)]
+async fn dispatch_sta_async(
+    task: Box<dyn FnOnce() -> Result<ComSend<Box<dyn Any>>> + Send>,
+) -> Result<ComSend<Box<dyn Any>>> {
+    task()
+}
+
+#[com_thread(MTA)]
+async fn dispatch_mta_async(
+    task: Box<dyn FnOnce() -> Result<ComSend<Box<dyn Any>>> + Send>,
+) -> Result<ComSend<Box<dyn Any>>> {
+    task()
+}
+
 pub struct ComWorker {
-    tx: mpsc::UnboundedSender<Message>,
-    join: Option<std::thread::JoinHandle<()>>,
     apartment: Apartment,
 }
 
-enum Message {
-    CallSync {
-        task: Box<dyn FnOnce() -> Result<ComSend<Box<dyn Any>>> + Send>,
-        resp: oneshot::Sender<Result<ComSend<Box<dyn Any>>, anyhow::Error>>,
-    },
-    CallAsync {
-        task: Box<dyn FnOnce() -> Result<ComSend<Box<dyn Any>>> + Send>,
-        resp: oneshot::Sender<Result<ComSend<Box<dyn Any>>, anyhow::Error>>,
-    },
-    Shutdown,
-}
-
 impl ComWorker {
-    /// Spawn a new COM worker thread with default apartment (see `Apartment::default()`).
+    /// Create a new worker with default apartment.
     ///
-    /// 注意：在 Tokio 异步运行时中调用此方法可能导致阻塞或死锁，因为它使用 `futures::executor::block_on`。建议在同步环境调用或使用全局实例。
+    /// Using `callcomapi_macros`, this is now safe to call from any context.
     pub fn new() -> Self {
         Self::with_apartment(Apartment::default())
     }
 
-    /// Create a `ComWorker` that initializes COM with the specified `apartment`.
-    ///
-    /// 注意：在 Tokio 异步运行时中调用此方法可能导致阻塞或死锁，因为它使用 `futures::executor::block_on`。建议在同步环境调用或使用全局实例。
+    /// Create a worker with the specified apartment.
     pub fn with_apartment(apartment: Apartment) -> Self {
-        let (tx, rx) = mpsc::unbounded::<Message>();
-        let join = std::thread::spawn(move || {
-            executor::block_on(async move { worker_loop(rx, apartment).await });
-        });
-        let worker = Self {
-            tx,
-            join: Some(join),
-            apartment,
-        };
-        worker
+        Self { apartment }
     }
 
-    /// Synchronous call: execute a closure on the COM worker thread and block until its result is returned.
-    ///
-    /// Apartment / thread contract:
-    /// - The closure `f` runs on the worker thread where COM has been initialized
-    ///   using the worker's configured `Apartment` (STA or MTA). COM interface
-    ///   calls must be made from that thread to avoid `RPC_E_WRONG_THREAD`.
-    /// - Keep the closure short and non-blocking; this API is intended for quick
-    ///   COM operations (property queries, activations, short method calls).
-    ///
-    /// Result and `ComSend` semantics:
-    /// - The returned value `R` is wrapped in `ComSend<R>` and returned to the caller.
-    /// - If `R: Send`, you may call `ComSend::unwrap()` to obtain it on the caller thread.
-    /// - If `R` is a non-Send COM interface, do *not* call `take()` on it from an
-    ///   arbitrary thread. Instead pass the `ComSend<R>` back into a `call_sync` or
-    ///   `call_async` closure and call `take()` inside that closure so the COM object
-    ///   is accessed/dropped on the COM thread.
-    ///
-    /// Example:
-    /// ```ignore
-    /// let handle = com_worker::call_sync(|| -> Result<IAudioClient> { /* ... */ })?;
-    /// com_worker::call_sync(move || {
-    ///     let client = handle.take(); // safe on COM thread
-    ///     /* use client */
-    ///     Ok(())
-    /// })?;
-    /// ```
+    /// Synchronous call: execute a closure on a dedicated COM thread.
     pub fn call_sync<R, F>(&self, f: F) -> Result<ComSend<R>>
     where
         R: 'static,
         F: FnOnce() -> Result<R> + Send + 'static,
     {
-        executor::block_on(async {
-            // wrap user's closure to return ComSend<Box<dyn Any>>
-            let (resp_tx, resp_rx) =
-                oneshot::channel::<Result<ComSend<Box<dyn Any>>, anyhow::Error>>();
-            // box the task
-            let task = Box::new(move || match f() {
-                Ok(r) => Ok(ComSend::new(Box::new(r) as Box<dyn Any>)),
-                Err(e) => Err(e),
-            }) as Box<dyn FnOnce() -> Result<ComSend<Box<dyn Any>>> + Send>;
+        let task = Box::new(move || match f() {
+            Ok(r) => Ok(ComSend::new(Box::new(r) as Box<dyn Any>)),
+            Err(e) => Err(e),
+        });
 
-            // send the task to the worker
-            self.tx
-                .unbounded_send(Message::CallSync {
-                    task,
-                    resp: resp_tx,
-                })
-                .map_err(|e| anyhow!("com worker channel send failed: {:?}", e))?;
+        let res = match self.apartment {
+            Apartment::STA => dispatch_sta_sync(task),
+            Apartment::MTA => dispatch_mta_sync(task),
+        }?;
 
-            // wait for the response
-            match resp_rx.await {
-                Ok(Ok(boxed_send)) => {
-                    let boxed = boxed_send.take();
-                    match boxed.downcast::<R>() {
-                        Ok(b) => Ok(ComSend::new(*b)),
-                        Err(_) => Err(anyhow!("type mismatch in com worker response")),
-                    }
-                }
-                Ok(Err(e)) => Err(e), // propagate error from task
-                Err(e) => Err(anyhow!("com worker response receive failed: {:?}", e)),
-            }
-        })
+        let boxed = res.take();
+        match boxed.downcast::<R>() {
+            Ok(b) => Ok(ComSend::new(*b)),
+            Err(_) => Err(anyhow!("type mismatch in com worker response")),
+        }
     }
 
-    /// Asynchronous call: execute a closure on the COM worker thread and return a future that resolves to the result.
-    ///
-    /// Apartment / thread contract:
-    /// - The closure `f` runs on the worker thread where COM has been initialized
-    ///   using the worker's configured `Apartment` (STA or MTA). COM interface
-    ///   calls must be made from that thread to avoid `RPC_E_WRONG_THREAD`.
-    /// - Keep the closure short and non-blocking; this API is intended for quick
-    ///   COM operations (property queries, activations, short method calls).
-    ///
-    /// Result and `ComSend` semantics:
-    /// - The returned future resolves to `ComSend<R>`.
-    /// - If `R: Send`, you may call `ComSend::unwrap()` to obtain it on the caller thread.
-    /// - If `R` is a non-Send COM interface, do *not* call `take()` on it from an
-    ///   arbitrary thread. Instead pass the `ComSend<R>` back into a `call_sync` or
-    ///   `call_async` closure and call `take()` inside that closure so the COM object
-    ///   is accessed/dropped on the COM thread.
-    ///
-    /// Example:
-    /// ```ignore
-    /// let handle = com_worker::call_async(|| -> Result<IAudioClient> { /* ... */ }).await?;
-    /// com_worker::call_async(move || {
-    ///     let client = handle.take(); // safe on COM thread
-    ///     /* use client */
-    ///     Ok(())
-    /// }).await?;
-    /// ```
+    /// Asynchronous call: execute a closure on a dedicated COM thread.
     pub fn call_async<R, F>(&self, f: F) -> futures::future::BoxFuture<'static, Result<ComSend<R>>>
     where
         R: 'static,
         F: FnOnce() -> Result<R> + Send + 'static,
     {
-        let (resp_tx, resp_rx) = oneshot::channel::<Result<ComSend<Box<dyn Any>>, anyhow::Error>>();
         let task = Box::new(move || match f() {
             Ok(r) => Ok(ComSend::new(Box::new(r) as Box<dyn Any>)),
             Err(e) => Err(e),
-        }) as Box<dyn FnOnce() -> Result<ComSend<Box<dyn Any>>> + Send>;
+        });
 
-        if let Err(e) = self.tx.unbounded_send(Message::CallAsync {
-            task,
-            resp: resp_tx,
-        }) {
-            return Box::pin(async move { Err(anyhow!("com worker channel send failed: {}", e)) });
-        }
-
+        let apartment = self.apartment;
         Box::pin(async move {
-            match resp_rx.await {
-                Ok(Ok(boxed_send)) => {
-                    let boxed = boxed_send.take();
-                    match boxed.downcast::<R>() {
-                        Ok(b) => Ok(ComSend::new(*b)),
-                        Err(_) => Err(anyhow!("type mismatch in com worker response")),
-                    }
-                }
-                Ok(Err(e)) => Err(e),
-                Err(e) => Err(anyhow!("com worker response receive failed: {}", e)),
+            let res = match apartment {
+                Apartment::STA => dispatch_sta_async(task).await,
+                Apartment::MTA => dispatch_mta_async(task).await,
+            }?;
+
+            let boxed = res.take();
+            match boxed.downcast::<R>() {
+                Ok(b) => Ok(ComSend::new(*b)),
+                Err(_) => Err(anyhow!("type mismatch in com worker response")),
             }
         })
     }
 
-    /// Request the worker to stop and join the thread.
-    pub fn stop(&mut self) {
-        // Best-effort: ignore errors when sending shutdown (thread may already be gone)
-        let _ = self.tx.send(Message::Shutdown);
-        if let Some(handle) = self.join.take() {
-            let _ = handle.join();
-        }
-    }
+    /// Request the worker to stop. (Deprecated: callcomapi_macros manages thread lifecycle)
+    pub fn stop(&mut self) {}
 
-    /// Start the worker thread if it is not already running.
-    ///
-    /// This allows restarting a previously stopped `ComWorker`.
-    pub fn start(&mut self) {
-        if self.join.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::unbounded::<Message>();
-        let apartment = self.apartment;
-        let join = std::thread::spawn(move || {
-            executor::block_on(async move { worker_loop(rx, apartment).await });
-        });
-        self.tx = tx;
-        self.join = Some(join);
-    }
+    /// Start the worker. (Deprecated: callcomapi_macros initializes on demand)
+    pub fn start(&mut self) {}
 
     /// Return true if the worker thread is running.
     pub fn is_running(&self) -> bool {
-        self.join.is_some()
+        true
     }
 }
 
 impl Drop for ComWorker {
     fn drop(&mut self) {
         self.stop();
-    }
-}
-
-async fn worker_loop(mut rx: mpsc::UnboundedReceiver<Message>, apartment: Apartment) {
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
-        use windows::Win32::System::Com::{
-            COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize,
-        };
-
-        // Initialize COM for this thread according to the requested apartment
-        let init_res = match apartment {
-            Apartment::MTA => unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) },
-            Apartment::STA => unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) },
-        };
-
-        match init_res {
-            Ok(_) => (),
-            Err(e) => {
-                if e.code() != RPC_E_CHANGED_MODE {
-                    log::error!("CoInitializeEx failed in com worker: {:?}", e);
-                    return;
-                }
-            }
-        }
-
-        // Run the message loop
-        while let Some(msg) = rx.next().await {
-            match msg {
-                Message::CallSync { task, resp } => {
-                    let res = task();
-                    // best-effort to send response
-                    let _ = resp.send(res);
-                }
-                Message::CallAsync { task, resp } => {
-                    let res = task();
-                    // best-effort to send response via oneshot
-                    let _ = resp.send(res);
-                }
-                Message::Shutdown => break,
-            }
-        }
-
-        // Uninitialize COM
-        unsafe { CoUninitialize() };
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        while let Some(msg) = rx.recv().await {
-            match msg {
-                Message::CallSync { task, resp } => {
-                    let res = task();
-                    let _ = resp.send(res);
-                }
-                Message::CallAsync { task, resp } => {
-                    let res = task();
-                    let _ = resp.send(res);
-                }
-                Message::Shutdown => break,
-            }
-        }
     }
 }
 
@@ -441,12 +289,10 @@ pub fn start_global() {
     g.start();
 }
 
-/// Set the global `ComWorker` apartment. This will stop the current worker and start a new one
+/// Set the global `ComWorker` apartment. This will start a new one
 /// using the requested apartment.
 pub fn set_global_apartment(apartment: Apartment) {
     let mut g = global_mut();
-    // stop existing worker first
-    g.stop();
     *g = ComWorker::with_apartment(apartment);
 }
 
@@ -548,6 +394,79 @@ mod tests {
 
         println!("MTA: {:?}, STA: {:?} ({} iters)", dur_m, dur_s, iters);
         // assert!(dur_m.as_secs_f64() < 30.0 && dur_s.as_secs_f64() < 30.0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn test_com_thread_async() {
+        use callcomapi_macros::com_thread;
+
+        #[com_thread]
+        async fn get_async_value(x: i32) -> i32 {
+            x + 20
+        }
+
+        let res = get_async_value(10).await;
+        assert_eq!(res, 30);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_with_com_mta() {
+        use callcomapi_macros::with_com;
+        use windows::Win32::Media::Audio::{IMMDeviceEnumerator, MMDeviceEnumerator};
+        use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
+
+        #[with_com("mta")]
+        fn check_mta() -> Result<()> {
+            let _enumerator: IMMDeviceEnumerator =
+                unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
+                    .map_err(|e| anyhow!("CoCreateInstance failed: {:?}", e))?;
+            Ok(())
+        }
+
+        assert!(check_mta().is_ok());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_com_thread_macro() {
+        use callcomapi_macros::com_thread;
+
+        #[com_thread]
+        fn add_ten(x: i32) -> i32 {
+            x + 10
+        }
+
+        assert_eq!(add_ten(5), 15);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_with_com_macro() {
+        use callcomapi_macros::with_com;
+        use windows::Win32::Media::Audio::{
+            IMMDeviceEnumerator, MMDeviceEnumerator, eConsole, eRender,
+        };
+        use windows::Win32::System::Com::CoCreateInstance;
+
+        #[with_com]
+        fn check_endpoint() -> Result<()> {
+            let enumerator: IMMDeviceEnumerator = unsafe {
+                CoCreateInstance(
+                    &MMDeviceEnumerator,
+                    None,
+                    windows::Win32::System::Com::CLSCTX_ALL,
+                )
+            }
+            .map_err(|e| anyhow!("CoCreateInstance failed: {:?}", e))?;
+
+            let _dev = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }
+                .map_err(|e| anyhow!("GetDefaultAudioEndpoint failed: {:?}", e))?;
+            Ok(())
+        }
+
+        assert!(check_endpoint().is_ok());
     }
 
     #[cfg(target_os = "windows")]
