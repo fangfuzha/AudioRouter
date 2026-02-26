@@ -149,10 +149,10 @@ impl DeviceWatcher {
                         NotificationClient::new(event_tx.clone()).into();
 
                     // Register for notifications
-                    // We use com_worker to perform the registration to ensure it's in a controlled COM environment
+                    // We use COM environment to perform the registration
                     crate::com_service::watcher::register_notification(
                         enumerator.clone(),
-                        crate::com_worker::ComSend::new(client.clone()),
+                        crate::utils::ComSend::new(client.clone()),
                     )?;
 
                     // Send an initial default-changed event so consumers can fetch current default
@@ -172,7 +172,7 @@ impl DeviceWatcher {
                     // Unregister callback
                     let _ = crate::com_service::watcher::unregister_notification(
                         enumerator,
-                        crate::com_worker::ComSend::new(client),
+                        crate::utils::ComSend::new(client),
                     );
                     Ok(())
                 })();

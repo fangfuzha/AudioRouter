@@ -90,7 +90,7 @@ impl Router {
                             get_mix_format, initialize_router, process_next_packet,
                             setup_router_clients,
                         },
-                        com_worker::ComSend,
+                        utils::ComSend,
                     };
 
                     // Extract data before moving cfg_for_worker
@@ -224,7 +224,9 @@ mod tests {
         let all_devices = get_all_output_devices().expect("failed to get all devices");
         let target_ids: Vec<String> = all_devices
             .into_iter()
-            .filter(|d| d.id != default_dev.id && d.state == crate::DeviceState::Active)
+            .filter(|d| {
+                d.id != default_dev.id && d.state == crate::com_service::device::DeviceState::Active
+            })
             .map(|d| d.id)
             .collect();
 

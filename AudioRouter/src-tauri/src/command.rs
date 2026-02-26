@@ -1,5 +1,6 @@
 use crate::{AppState, DeviceLog, RoutingParams};
-use audio_core::{get_all_output_devices, RouterConfig};
+use audio_core::com_service::device::get_all_output_devices;
+use audio_core::router::RouterConfig;
 use config::config::{General, Output};
 use config::Config;
 use std::collections::HashMap;

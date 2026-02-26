@@ -1,4 +1,4 @@
-use audio_core::{Router, RouterConfig};
+use audio_core::router::{Router, RouterConfig};
 use config::ChannelMixMode;
 use config::ConfigManager;
 use specta_typescript::Typescript;

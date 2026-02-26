@@ -6,6 +6,7 @@
 
 use crate::utils::{map_state, win_helpers};
 use anyhow::{Result, anyhow};
+use callcomapi_macros::with_com;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -173,20 +174,17 @@ fn get_device_info_internal(
     })
 }
 
-/// Helper that wraps execution in ComWorker
-///
 /// Retrieves a list of all active audio output devices on the system.
-/// This function is thread-safe and handles COM initialization internally.
+/// This function is thread-safe and handles COM initialization internally via `#[with_com]`.
 ///
 /// # Returns
 /// A vector of `DeviceInfo` structs containing details about each device.
 ///
 /// # Errors
 /// Returns an error if device enumeration fails or COM operations encounter issues.
+#[with_com]
 pub fn get_all_output_devices() -> Result<Vec<DeviceInfo>> {
-    crate::com_worker::global()
-        .call_sync(|| get_all_output_devices_internal())
-        .map(|s| s.take())
+    get_all_output_devices_internal()
 }
 
 /// Retrieves information about the default audio output device.
@@ -196,16 +194,15 @@ pub fn get_all_output_devices() -> Result<Vec<DeviceInfo>> {
 ///
 /// # Errors
 /// Returns an error if the default device cannot be retrieved.
+#[with_com]
 pub fn get_default_output_device() -> Result<DeviceInfo> {
-    crate::com_worker::global()
-        .call_sync(|| get_default_output_device_internal())
-        .map(|s| s.take())
+    get_default_output_device_internal()
 }
 
 /// Retrieves an audio device by its ID.
 ///
 /// This function returns a `ComSend<IMMDevice>` to ensure the device interface
-/// is accessed on the correct COM thread.
+/// can be safely moved between threads.
 ///
 /// # Parameters
 /// - `id`: The device ID string.
@@ -215,9 +212,10 @@ pub fn get_default_output_device() -> Result<DeviceInfo> {
 ///
 /// # Errors
 /// Returns an error if the device with the given ID is not found.
-pub fn get_output_device_by_id(id: &str) -> Result<crate::com_worker::ComSend<IMMDevice>> {
+#[with_com]
+pub fn get_output_device_by_id(id: &str) -> Result<crate::utils::ComSend<IMMDevice>> {
     let id_str = id.to_string();
-    crate::com_worker::global().call_sync(move || get_output_device_by_id_internal(&id_str))
+    get_output_device_by_id_internal(&id_str).map(crate::utils::ComSend::new)
 }
 
 #[cfg(test)]
@@ -227,7 +225,6 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn device_api_behaves() {
-        crate::com_worker::start_global();
         // Windows-only integration test: enumerate devices and print details for inspection.
         let devices = get_all_output_devices().expect("list devices");
         if devices.is_empty() {

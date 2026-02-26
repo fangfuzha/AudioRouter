@@ -1,5 +1,29 @@
 use crate::com_service::device::DeviceState;
 
+/// A wrapper to allow passing COM pointers/interfaces between threads safely.
+#[derive(Debug, Clone)]
+pub struct ComSend<T>(T);
+
+unsafe impl<T> Send for ComSend<T> {}
+unsafe impl<T> Sync for ComSend<T> {}
+
+impl<T> ComSend<T> {
+    pub fn new(t: T) -> Self {
+        Self(t)
+    }
+
+    /// Consume the wrapper and return the underlying value.
+    pub fn take(self) -> T {
+        self.0
+    }
+}
+
+impl<T: Send> ComSend<T> {
+    pub fn unwrap(self) -> T {
+        self.0
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub(crate) fn map_state(state: u32) -> DeviceState {
     use windows::Win32::Media::Audio::{
