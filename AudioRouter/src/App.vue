@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted, watch, computed } from "vue";
 import { listen } from "@tauri-apps/api/event";
 import { useI18n } from "vue-i18n";
+import { checkForUpdates } from "./utils/update";
 import {
   commands,
   type ChannelMixMode,
@@ -112,6 +113,7 @@ let unlistenStop: any = null;
 
 onMounted(async () => {
   await refreshUI();
+  await checkForUpdates();
 
   // 监听路由配置变化并自动保存
   watch(() => selectedSource.value, saveRoutingConfig);

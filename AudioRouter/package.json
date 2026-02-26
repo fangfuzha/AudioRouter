@@ -8,12 +8,13 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri dev": "tauri dev",
-    "tauri build" : "tauri build"
+    "tauri build": "tauri build"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.18",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-shell": "^2.3.5",
     "tailwindcss": "^4.1.18",
     "vue": "^3.5.13",
     "vue-i18n": "^11.2.8"

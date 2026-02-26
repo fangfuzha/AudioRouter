@@ -5,12 +5,12 @@ use specta_typescript::Typescript;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tauri::{
+    Emitter, Manager,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager,
 };
 use tauri_plugin_autostart::MacosLauncher;
-use tauri_specta::{collect_commands, Builder};
+use tauri_specta::{Builder, collect_commands};
 
 // moving tauri commands to a separate module for clarity
 mod command;
@@ -83,6 +83,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_shell::init())
         // Auto start plugin, add --minimized arg when Startup with system
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
