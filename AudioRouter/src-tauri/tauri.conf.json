@@ -15,8 +15,10 @@
         "title": "AudioRouter",
         "visible": false,
         "width": 900,
-        "height": 680,
-        "resizable": false,
+        "height": 720,
+        "minWidth": 700,
+        "minHeight": 500,
+        "resizable": true,
         "decorations": true,
         "transparent": true
       }

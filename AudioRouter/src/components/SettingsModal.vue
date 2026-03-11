@@ -54,13 +54,17 @@ onMounted(() => {
     @click.self="emit('close')"
   >
     <div
-      class="w-80 bg-[#0e141d] border border-white/10 rounded-2xl shadow-2xl p-6 flex flex-col gap-6"
+      class="w-80 border border-white/10 rounded-2xl shadow-2xl p-6 flex flex-col gap-6"
+      style="background: var(--bg-secondary)"
     >
       <div class="flex items-center justify-between">
-        <h3 class="text-lg font-bold text-white">{{ t("SettingsTitle") }}</h3>
+        <h3 class="text-lg font-bold" style="color: var(--text-primary)">
+          {{ t("SettingsTitle") }}
+        </h3>
         <button
           @click="emit('close')"
-          class="text-[#8c8c8c] hover:text-white transition-colors"
+          class="transition-colors hover:text-primary"
+          style="color: var(--text-muted)"
         >
           <CloseIcon />
         </button>
@@ -69,48 +73,56 @@ onMounted(() => {
       <div class="flex flex-col gap-4">
         <label class="flex items-center justify-between cursor-pointer group">
           <span
-            class="text-[#eaeaea] group-hover:text-white transition-colors"
+            class="transition-colors group-hover:text-white"
+            style="color: var(--text-primary)"
             >{{ t("StartWithWindows") }}</span
           >
           <input
             type="checkbox"
             v-model="draftGeneral.start_with_windows"
-            class="w-5 h-5 rounded border-white/10 bg-[#0b0f14] checked:bg-[#2bd97f] focus:ring-0 transition-all cursor-pointer"
+            class="w-5 h-5 rounded border-white/10 checked:bg-[#2bd97f] focus:ring-0 transition-all cursor-pointer"
+            style="background: var(--bg-primary)"
           />
         </label>
 
         <label class="flex items-center justify-between cursor-pointer group">
           <span
-            class="text-[#eaeaea] group-hover:text-white transition-colors"
+            class="transition-colors group-hover:text-white"
+            style="color: var(--text-primary)"
             >{{ t("StartMinimized") }}</span
           >
           <input
             type="checkbox"
             v-model="draftGeneral.minimized"
-            class="w-5 h-5 rounded border-white/10 bg-[#0b0f14] checked:bg-[#2bd97f] focus:ring-0 transition-all cursor-pointer"
+            class="w-5 h-5 rounded border-white/10 checked:bg-[#2bd97f] focus:ring-0 transition-all cursor-pointer"
+            style="background: var(--bg-primary)"
           />
         </label>
 
         <label class="flex items-center justify-between cursor-pointer group">
           <span
-            class="text-[#eaeaea] group-hover:text-white transition-colors"
+            class="transition-colors group-hover:text-white"
+            style="color: var(--text-primary)"
             >{{ t("AutoRoute") }}</span
           >
           <input
             type="checkbox"
             v-model="draftGeneral.auto_route"
-            class="w-5 h-5 rounded border-white/10 bg-[#0b0f14] checked:bg-[#2bd97f] focus:ring-0 transition-all cursor-pointer"
+            class="w-5 h-5 rounded border-white/10 checked:bg-[#2bd97f] focus:ring-0 transition-all cursor-pointer"
+            style="background: var(--bg-primary)"
           />
         </label>
 
         <label class="flex items-center justify-between cursor-pointer group">
           <span
-            class="text-[#eaeaea] group-hover:text-white transition-colors"
+            class="transition-colors group-hover:text-white"
+            style="color: var(--text-primary)"
             >{{ t("Language") }}</span
           >
           <select
             v-model="draftGeneral.language"
-            class="bg-[#0e141d] border border-white/5 p-2 rounded-lg text-sm outline-none focus:border-[#2bd97f]/50 transition-colors cursor-pointer"
+            class="border border-white/5 p-2 rounded-lg text-sm outline-none focus:border-[#2bd97f]/50 transition-colors cursor-pointer"
+            style="background: var(--bg-secondary); color: var(--text-primary)"
           >
             <option
               v-for="l in availableLanguages"
@@ -125,7 +137,8 @@ onMounted(() => {
 
       <button
         @click="updateGeneralConfig"
-        class="mt-2 w-full bg-[#2bd97f] hover:bg-[#24b86b] text-[#0b0f14] font-bold py-3 rounded-xl transition-all shadow-lg shadow-[#2bd97f]/20"
+        class="mt-2 w-full hover:bg-[#24b86b] text-[#0b0f14] font-bold py-3 rounded-xl transition-all shadow-lg shadow-[#2bd97f]/20"
+        style="background: var(--accent-green)"
       >
         {{ t("Save") }}
       </button>

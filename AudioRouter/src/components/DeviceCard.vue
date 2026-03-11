@@ -28,20 +28,22 @@ const updateMixMode = (e: Event) => {
 
 <template>
   <div
-    class="bg-[#111823] p-4 rounded-xl border border-white/5 flex items-center justify-between hover:border-white/10 transition-colors"
+    class="p-4 rounded-xl border flex items-center justify-between hover:border-white/10 transition-colors"
     :class="{ 'opacity-50': !enabled }"
+    style="background: var(--bg-tertiary); border-color: var(--border-color);"
   >
     <div class="flex items-center gap-4">
       <div
         @click="toggleEnabled"
         class="w-6 h-6 rounded-md border-2 cursor-pointer flex items-center justify-center transition-colors"
-        :class="enabled ? 'bg-[#2bd97f] border-[#2bd97f]' : 'border-white/20'"
+        :class="enabled ? 'border-[#2bd97f]' : 'border-white/20'"
+        :style="enabled ? 'background: var(--accent-green);' : ''"
       >
         <CheckmarkIcon v-if="enabled" />
       </div>
       <div class="flex flex-col">
-        <span class="text-[#eaeaea] font-medium">{{ name }}</span>
-        <span class="text-[#8c8c8c] text-xs">{{ id }}</span>
+        <span class="font-medium" style="color: var(--text-primary);">{{ name }}</span>
+        <span class="text-xs" style="color: var(--text-muted);">{{ id }}</span>
       </div>
     </div>
 
@@ -50,7 +52,8 @@ const updateMixMode = (e: Event) => {
         :disabled="!enabled"
         :value="mixMode"
         @change="updateMixMode"
-        class="bg-[#0e141d] border border-white/5 p-2 rounded-lg text-sm outline-none focus:border-[#2bd97f]/50 transition-colors disabled:opacity-50 cursor-pointer"
+        class="border border-white/5 p-2 rounded-lg text-sm outline-none focus:border-[#2bd97f]/50 transition-colors disabled:opacity-50 cursor-pointer"
+        style="background: var(--bg-secondary); color: var(--text-primary);"
       >
         <option value="Stereo" :title="t('mixModeTooltips.Stereo')">
           {{ t("mixModes.Stereo") }}

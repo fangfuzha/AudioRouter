@@ -11,6 +11,7 @@ import {
 } from "./generated/bindings";
 import DeviceCard from "./components/DeviceCard.vue";
 import SettingsModal from "./components/SettingsModal.vue";
+import TitleBar from "./components/TitleBar.vue";
 import RefreshIcon from "./components/icons/RefreshIcon.vue";
 import SettingsIcon from "./components/icons/SettingsIcon.vue";
 import PlayIcon from "./components/icons/PlayIcon.vue";
@@ -45,6 +46,23 @@ async function saveRoutingConfig() {
       enabled: d.enabled,
     }));
     await unwrap(commands.saveRoutingConfig(selectedSource.value, outputs));
+
+    if (isRunning.value) {
+      await unwrap(commands.stopRouting());
+
+      const targets = target_devices.value
+        .filter((d) => d.enabled)
+        .map((d) => [d.id, d.mix_mode] as [string, ChannelMixMode]);
+
+      if (targets.length > 0) {
+        await unwrap(
+          commands.startRouting({
+            source_id: selectedSource.value,
+            targets: targets,
+          }),
+        );
+      }
+    }
   } catch (e) {
     console.error("Failed to save routing config:", e);
   }
@@ -119,7 +137,7 @@ onMounted(async () => {
   watch(() => selectedSource.value, saveRoutingConfig);
   watch(() => target_devices.value, saveRoutingConfig, { deep: true });
 
-  // listen to routing start/stop events from backend
+  // 监听来自后端的路由启动/停止事件
   unlistenStart = await listen("routing-started", () => {
     isRunning.value = true;
     const runningCount = filtered_target_devices.value.filter(
@@ -142,8 +160,10 @@ onUnmounted(() => {
 
 <template>
   <div
-    class="h-170 w-225 bg-[#0b0f14] text-[#eaeaea] flex flex-col overflow-hidden border border-white/10 rounded-xl"
+    class="h-full w-full text-[#eaeaea] flex flex-col overflow-hidden border border-white/10 rounded-xl"
+    style="background: var(--bg-primary)"
   >
+    <TitleBar />
     <div class="flex-1 p-8 overflow-hidden flex flex-col gap-6">
       <!-- Source Section -->
       <div class="flex flex-col gap-3 text-left">
@@ -153,7 +173,8 @@ onUnmounted(() => {
         >
         <select
           v-model="selectedSource"
-          class="bg-[#0e141d] border border-white/5 p-3 rounded-xl outline-none focus:border-[#2bd97f]/50 transition-colors cursor-pointer"
+          class="border border-white/5 p-3 rounded-xl outline-none focus:border-[#2bd97f]/50 transition-colors cursor-pointer"
+          style="background: var(--bg-secondary); color: var(--text-primary)"
         >
           <option v-for="d in sorted_target_devices" :key="d.id" :value="d.id">
             {{ d.name }}
@@ -184,7 +205,8 @@ onUnmounted(() => {
 
     <!-- Bottom Bar -->
     <div
-      class="h-20 bg-[#0b0f14] border-t border-white/5 flex items-center justify-between px-8"
+      class="h-20 border-t border-white/5 flex items-center justify-between px-8"
+      style="background: var(--bg-primary)"
     >
       <div class="flex items-center gap-2">
         <div
@@ -195,21 +217,25 @@ onUnmounted(() => {
               : 'bg-[#ff0000]'
           "
         ></div>
-        <div class="text-[#b3b3b3] text-sm">{{ statusText }}</div>
+        <div class="text-sm" style="color: var(--text-secondary)">
+          {{ statusText }}
+        </div>
       </div>
 
       <div class="flex items-center gap-2">
         <button
           @click="refreshUI"
-          class="p-3 text-[#b3b3b3] hover:bg-[#111823] rounded-xl transition-colors"
+          class="p-3 hover:bg-[#111823] rounded-xl transition-colors"
           :title="t('RefreshDevices')"
+          style="color: var(--text-secondary)"
         >
           <RefreshIcon />
         </button>
         <button
           @click="showSettings = true"
-          class="p-3 text-[#b3b3b3] hover:bg-[#111823] rounded-xl transition-colors"
+          class="p-3 hover:bg-[#111823] rounded-xl transition-colors"
           :title="t('Settings')"
+          style="color: var(--text-secondary)"
         >
           <SettingsIcon />
         </button>
@@ -220,7 +246,8 @@ onUnmounted(() => {
         <button
           v-if="!isRunning"
           @click="startRouting"
-          class="bg-[#2bd97f] hover:bg-[#23c86e] text-[#0b0f14] px-8 h-11 rounded-xl font-bold transition-all flex items-center gap-2"
+          class="hover:bg-[#23c86e] text-[#0b0f14] px-8 h-11 rounded-xl font-bold transition-all flex items-center gap-2 shadow-[0_4px_12px_rgba(43,217,127,0.2)]"
+          style="background: var(--accent-green)"
         >
           <PlayIcon />
           {{ t("Start") }}
@@ -228,7 +255,8 @@ onUnmounted(() => {
         <button
           v-else
           @click="stopRouting"
-          class="bg-[#ff4d4d] hover:bg-[#e63c3c] text-white px-8 h-11 rounded-xl font-bold transition-all flex items-center gap-2 shadow-[0_4px_12px_rgba(255,77,77,0.2)]"
+          class="hover:bg-[#e63c3c] text-white px-8 h-11 rounded-xl font-bold transition-all flex items-center gap-2 shadow-[0_4px_12px_rgba(255,77,77,0.2)]"
+          style="background: var(--accent-red)"
         >
           <StopIcon />
           {{ t("Stop") }}

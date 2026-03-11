@@ -2,6 +2,16 @@
 
 /* Root: allow transparent page background so Tauri window transparency shows through */
 :root {
+  --bg-primary: #0b0f14;
+  --bg-secondary: #0e141d;
+  --bg-tertiary: #111823;
+  --text-primary: #eaeaea;
+  --text-secondary: #b3b3b3;
+  --text-muted: #8c8c8c;
+  --border-color: rgba(255, 255, 255, 0.05);
+  --border-color-hover: rgba(255, 255, 255, 0.1);
+  --accent-green: #2bd97f;
+  --accent-red: #ff4d4d;
   background-color: transparent;
 }
 
@@ -14,10 +24,15 @@ body {
 
 /* App container layout */
 #app {
-  height: 100vh;
-  width: 100vw;
+  height: 100%;
+  width: 100%;
   display: flex;
   flex-direction: column;
+}
+
+/* Custom hover utilities for CSS variables */
+.hover\:text-primary:hover {
+  color: var(--text-primary);
 }
 
 /* Custom scrollbar styling used by components with .custom-scrollbar */
