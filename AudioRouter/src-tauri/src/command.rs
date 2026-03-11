@@ -1,8 +1,8 @@
 use crate::{AppState, DeviceLog, RoutingParams};
 use audio_core::com_service::device::get_all_output_devices;
 use audio_core::router::RouterConfig;
-use config::config::{General, Output};
 use config::Config;
+use config::config::{General, Output};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
