@@ -1,4 +1,3 @@
-use config::ChannelMixMode;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
@@ -11,14 +10,13 @@ pub struct DeviceLog {
 #[derive(Debug, Deserialize, Type)]
 pub struct RoutingParams {
     pub source_id: Option<String>,
-    pub targets: Vec<(String, ChannelMixMode)>,
+    pub targets: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Type)]
 pub struct UiDataTargetDevice {
     pub id: String,
     pub name: String,
-    pub mix_mode: ChannelMixMode,
     pub enabled: bool,
 }
 

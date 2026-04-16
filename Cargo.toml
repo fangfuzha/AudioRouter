@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["audio_core", "config", "AudioRouter/src-tauri"]
+members = ["audio_core", "config", "audio_router_tauri/src-tauri"]
 
 # Release 编译优化：优先提高运行时性能并减小产物体积
 # - opt-level=3: 最大化运行时性能

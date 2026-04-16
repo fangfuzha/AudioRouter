@@ -122,7 +122,6 @@ impl Default for Router {
 mod tests {
     use super::*;
     use crate::com_service::device::{get_all_output_devices, get_default_output_device};
-    use ::config::ChannelMixMode;
     use std::time::Duration;
     use tokio::time::sleep;
 
@@ -158,10 +157,7 @@ mod tests {
         // 3. Configure Router
         let config = RouterConfig {
             source_device_id: Some(default_dev.id),
-            target_config: target_ids
-                .into_iter()
-                .map(|id| (id, ChannelMixMode::Stereo))
-                .collect(),
+            target_device_ids: target_ids,
         };
 
         let router = Router::new();

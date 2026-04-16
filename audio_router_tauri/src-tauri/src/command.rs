@@ -61,10 +61,9 @@ pub async fn start_routing(
     state: State<'_, AppState>,
     params: RoutingParams,
 ) -> Result<(), String> {
-    // Start routing
     let cfg = RouterConfig {
         source_device_id: params.source_id,
-        target_config: params.targets,
+        target_device_ids: params.targets,
     };
 
     fn noop_cb(_: &[f32], _: u32, _: u16) {}
@@ -164,9 +163,6 @@ pub async fn get_ui_data(state: State<'_, AppState>) -> Result<crate::UiData, St
             crate::UiDataTargetDevice {
                 id: d.id,
                 name: d.friendly_name,
-                mix_mode: output
-                    .map(|o| o.channel_mode)
-                    .unwrap_or(config::ChannelMixMode::Stereo),
                 enabled: output.map(|o| o.enabled).unwrap_or(false),
             }
         })

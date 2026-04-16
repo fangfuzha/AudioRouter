@@ -7,35 +7,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Represents different channel mixing modes for routing stereo audio to multi-channel outputs.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Type, Default,
-)]
-pub enum ChannelMixMode {
-    /// Stereo: Pass through both channels unchanged
-    #[default]
-    Stereo = 0,
-    /// Left: Left channel to all outputs
-    Left = 1,
-    /// Right: Right channel to all outputs
-    Right = 2,
-    /// Center: Mono mix (L+R)/2 to all outputs
-    Center = 3,
-    /// Front Left: Same as Left
-    FrontLeft = 4,
-    /// Front Right: Same as Right
-    FrontRight = 5,
-    /// Back Left: Left channel at 85% volume to all outputs
-    BackLeft = 6,
-    /// Back Right: Right channel at 85% volume to all outputs
-    BackRight = 7,
-    /// Back/Surround: Mono mix to all outputs
-    BackSurround = 8,
-    /// Subwoofer (LFE): Mono mix with 1.3x boost to all outputs
-    Subwoofer = 9,
-}
-
-/// Main configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct Config {
     pub config_version: i32,
@@ -56,18 +27,12 @@ pub struct General {
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct Output {
     pub device_id: String,
-    #[serde(default = "default_channel_mode")]
-    pub channel_mode: ChannelMixMode,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
 
 fn default_true() -> bool {
     true
-}
-
-fn default_channel_mode() -> ChannelMixMode {
-    ChannelMixMode::Stereo
 }
 
 impl Default for Config {
@@ -202,7 +167,6 @@ mod tests {
             outputs: vec![Output {
                 device_id: "out1".to_string(),
                 enabled: true,
-                channel_mode: ChannelMixMode::Stereo,
             }],
         };
         let s = toml::to_string_pretty(&cfg).expect("serialize");

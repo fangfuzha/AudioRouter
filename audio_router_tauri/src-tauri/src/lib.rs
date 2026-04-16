@@ -1,5 +1,4 @@
 use audio_core::router::{Router, RouterConfig};
-use config::ChannelMixMode;
 use config::ConfigManager;
 use specta_typescript::Typescript;
 use std::sync::Arc;
@@ -35,17 +34,17 @@ fn show_and_focus_window(app: &tauri::AppHandle, label: &str) {
 /// Handle auto routing based on configuration
 fn handle_auto_routing(router: &Router, config: &config::Config, app: &tauri::App) {
     if config.general.auto_route && !config.source_device_id.is_empty() {
-        let target_config: Vec<(String, ChannelMixMode)> = config
+        let target_device_ids: Vec<String> = config
             .outputs
             .iter()
             .filter(|o| o.enabled)
-            .map(|o| (o.device_id.clone(), o.channel_mode.clone()))
+            .map(|o| o.device_id.clone())
             .collect();
 
-        if !target_config.is_empty() {
+        if !target_device_ids.is_empty() {
             let cfg = RouterConfig {
                 source_device_id: Some(config.source_device_id.clone()),
-                target_config,
+                target_device_ids,
             };
 
             fn noop_cb(_: &[f32], _: u32, _: u16) {}

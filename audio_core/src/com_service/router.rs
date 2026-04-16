@@ -1,4 +1,3 @@
-use crate::channel_mixer::ChannelMixer;
 use crate::com_service::device::get_output_device_by_id_internal;
 use crate::router::RouterConfig;
 use crate::utils::ComSend;
@@ -37,7 +36,7 @@ fn setup_router_clients_internal(cfg: &RouterConfig) -> Result<RouterSetupResult
         .map_err(|e| anyhow!("Failed to activate source IAudioClient: {:?}", e))?;
 
     let mut output_clients = Vec::new();
-    for (out_id, _) in &cfg.target_config {
+    for out_id in &cfg.target_device_ids {
         if let Ok(dev) = get_output_device_by_id_internal(out_id) {
             if let Ok(client) = unsafe { dev.Activate::<IAudioClient>(CLSCTX_ALL, None) } {
                 output_clients.push((out_id.clone(), client));
@@ -200,7 +199,6 @@ pub fn initialize_router(
 pub fn process_next_packet<F>(
     init_res: ComSend<RouterInitialized>,
     pwf_bytes: ComSend<Vec<u8>>,
-    mixers: Vec<ChannelMixer>,
     cb: Arc<F>,
 ) -> Result<bool>
 where
@@ -323,39 +321,13 @@ where
             }
 
             // --- 2. Clone to all output devices ---
-            for (i, render) in renders.iter().enumerate() {
-                if i >= mixers.len() {
-                    continue; // Should not happen
-                }
-                let mixer = &mixers[i];
-
+            for render in renders.iter() {
                 match render.GetBuffer(frames) {
                     Ok(render_buf_ptr) => {
-                        if handled && w_format == 3u16 {
-                            // IEEE float32 format: mix f32 samples and copy
-                            let mixed_samples = mixer.process_samples(&out_f32, channels_count);
-                            let mixed_bytes = std::slice::from_raw_parts(
-                                mixed_samples.as_ptr() as *const u8,
-                                mixed_samples.len() * std::mem::size_of::<f32>(),
-                            );
-                            std::ptr::copy_nonoverlapping(
-                                mixed_bytes.as_ptr(),
-                                render_buf_ptr,
-                                bytes,
-                            );
-                        } else {
-                            // Fallback: copy original buffer
-                            std::ptr::copy_nonoverlapping(buf_ptr, render_buf_ptr, bytes);
-                        }
-                        if let Err(_e) = render.ReleaseBuffer(frames, 0) {
-                            // Silently ignore or log once?
-                        }
+                        std::ptr::copy_nonoverlapping(buf_ptr, render_buf_ptr, bytes);
+                        if let Err(_e) = render.ReleaseBuffer(frames, 0) {}
                     }
-                    Err(_e) => {
-                        // If buffer is too large, it means we are out of sync or
-                        // the output buffer is full. In a simple loopback,
-                        // we might just skip this packet.
-                    }
+                    Err(_e) => {}
                 }
             }
 

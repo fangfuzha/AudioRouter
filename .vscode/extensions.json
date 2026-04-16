@@ -9,7 +9,6 @@
     "esbenp.prettier-vscode",
     "dbaeumer.vscode-eslint",
     "mhutchie.git-graph",
-
-
+    "slint.slint-nightly",
   ]
 }
