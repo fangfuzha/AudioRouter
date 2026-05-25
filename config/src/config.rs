@@ -29,6 +29,9 @@ pub struct Output {
     pub device_id: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Mix mode: "Stereo", "Left", "Right", "Center", etc.
+    #[serde(default)]
+    pub channel_mode: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -167,6 +170,7 @@ mod tests {
             outputs: vec![Output {
                 device_id: "out1".to_string(),
                 enabled: true,
+                channel_mode: None,
             }],
         };
         let s = toml::to_string_pretty(&cfg).expect("serialize");
