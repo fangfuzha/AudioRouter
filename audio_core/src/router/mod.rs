@@ -14,6 +14,7 @@ use anyhow::{Result, anyhow};
 use parking_lot::RwLock;
 use std::sync::{Arc, mpsc};
 use std::thread;
+use std::time::Duration;
 
 /// Main router interface for audio routing operations.
 #[derive(Debug, Clone)]
@@ -43,29 +44,53 @@ impl Router {
     where
         F: Fn(&[f32], u32, u16) + Send + Sync + 'static,
     {
-        // Check if already running
         {
-            let st = self.inner.read();
+            let mut st = self.inner.write();
             if st.running {
                 return Err(anyhow!("router already running"));
             }
+            st.running = true;
+            st.cfg = cfg.clone();
         }
 
-        // Prepare worker control
         let (stop_tx, stop_rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::channel();
         let cfg_for_worker = cfg.clone();
 
-        // Spawn worker thread with error propagation
-        let handle = thread::spawn(move || worker::run_worker(cfg_for_worker, cb, stop_rx));
+        let handle =
+            thread::spawn(move || worker::run_worker(cfg_for_worker, cb, stop_rx, ready_tx));
 
-        // Update internal state
-        let mut st = self.inner.write();
-        st.cfg = cfg.clone();
-        st.running = true;
-        st.worker_stop_tx = Some(stop_tx);
-        st.worker_join = Some(handle);
-
-        Ok(())
+        match ready_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(())) => {
+                let mut st = self.inner.write();
+                st.worker_stop_tx = Some(stop_tx);
+                st.worker_join = Some(handle);
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                let join_error = match handle.join() {
+                    Ok(Ok(())) => None,
+                    Ok(Err(joined)) => Some(joined),
+                    Err(panic) => Some(anyhow!("Worker thread panicked: {:?}", panic)),
+                };
+                self.reset_state();
+                Err(join_error.unwrap_or(e))
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let _ = stop_tx.send(());
+                self.reset_state();
+                Err(anyhow!("router worker did not report readiness in time"))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let join_error = match handle.join() {
+                    Ok(Ok(())) => anyhow!("router worker exited before reporting readiness"),
+                    Ok(Err(e)) => e,
+                    Err(panic) => anyhow!("Worker thread panicked: {:?}", panic),
+                };
+                self.reset_state();
+                Err(join_error)
+            }
+        }
     }
 
     /// Starts routing with a no-op callback.
@@ -81,27 +106,31 @@ impl Router {
     /// # Errors
     /// Returns an error if router is not running.
     pub fn stop(&self) -> Result<()> {
-        let mut st = self.inner.write();
-        if !st.running {
-            return Err(anyhow!("router not running"));
-        }
-
-        // Signal worker to stop and wait for completion
-        if let Some(tx) = st.worker_stop_tx.take() {
-            let _ = tx.send(()); // Ignore error if worker already exited
-        }
-
-        // Join worker thread and propagate errors
-        if let Some(handle) = st.worker_join.take() {
-            match handle.join() {
-                Ok(Ok(())) => {} // Success
-                Ok(Err(e)) => return Err(anyhow!("Worker thread error: {:?}", e)),
-                Err(e) => return Err(anyhow!("Worker thread panicked: {:?}", e)),
+        let (tx, handle) = {
+            let mut st = self.inner.write();
+            if !st.running {
+                return Err(anyhow!("router not running"));
             }
+            (st.worker_stop_tx.take(), st.worker_join.take())
+        };
+
+        if let Some(tx) = tx {
+            let _ = tx.send(());
         }
 
-        st.running = false;
-        st.cfg = RouterConfig::default();
+        let result = if let Some(handle) = handle {
+            match handle.join() {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(anyhow!("Worker thread error: {:?}", e)),
+                Err(e) => Err(anyhow!("Worker thread panicked: {:?}", e)),
+            }
+        } else {
+            Ok(())
+        };
+
+        self.reset_state();
+
+        result?;
 
         Ok(())
     }
@@ -109,6 +138,14 @@ impl Router {
     /// Returns whether the router is currently running.
     pub fn is_running(&self) -> bool {
         self.inner.read().running
+    }
+
+    fn reset_state(&self) {
+        let mut st = self.inner.write();
+        st.running = false;
+        st.cfg = RouterConfig::default();
+        st.worker_stop_tx = None;
+        st.worker_join = None;
     }
 }
 
@@ -126,6 +163,7 @@ mod tests {
     use tokio::time::sleep;
 
     #[tokio::test]
+    #[ignore = "requires real Windows audio devices"]
     async fn test_clone_default_to_all_outputs() {
         // 1. Get default output device as source
         let default_dev = get_default_output_device().expect("failed to get default device");
