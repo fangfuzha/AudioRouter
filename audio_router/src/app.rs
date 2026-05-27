@@ -2,14 +2,14 @@
 
 use std::sync::mpsc;
 
-use audio_core::com_service::device::get_all_output_devices;
 use audio_core::com_service::device::DeviceInfo;
+use audio_core::com_service::device::get_all_output_devices;
 use audio_core::router::{Router, RouterConfig};
 use config::ConfigManager;
 use config::config::{General, Output};
 
 use crate::i18n::I18n;
-use crate::tray::TrayCommand;
+use crate::tray::{AppToTrayCommand, TrayToAppCommand};
 use crate::update::UpdateStatus;
 use crate::views;
 
@@ -26,8 +26,8 @@ pub struct AudioRouterApp {
     pub show_settings: bool,
     pub app_exit: bool,
     pub request_window_show: bool,
-    pub tray_rx: mpsc::Receiver<TrayCommand>,
-    pub tray_tx: mpsc::Sender<TrayCommand>,
+    pub tray_rx: mpsc::Receiver<TrayToAppCommand>,
+    pub tray_tx: mpsc::Sender<AppToTrayCommand>,
     pub update_status: UpdateStatus,
     pub draft_general: General,
     pub initialized: bool,
@@ -38,8 +38,9 @@ impl AudioRouterApp {
         cc: &eframe::CreationContext<'_>,
         config_manager: ConfigManager,
         router: Router,
-        tray_rx: mpsc::Receiver<TrayCommand>,
-        tray_tx: mpsc::Sender<TrayCommand>,
+        tray_rx: mpsc::Receiver<TrayToAppCommand>,
+        tray_tx: mpsc::Sender<AppToTrayCommand>,
+        initial_window_visible: bool,
     ) -> Self {
         Self::setup_style(cc);
         let cfg = config_manager.handle().read().clone();
@@ -57,7 +58,7 @@ impl AudioRouterApp {
             },
             is_running: false,
             status_text: String::new(),
-            window_visible: true,
+            window_visible: initial_window_visible,
             show_settings: false,
             app_exit: false,
             request_window_show: false,
@@ -81,8 +82,7 @@ impl AudioRouterApp {
         v.extreme_bg_color = egui::Color32::from_rgb(17, 24, 35);
         v.warn_fg_color = egui::Color32::from_rgb(255, 77, 77);
         v.hyperlink_color = egui::Color32::from_rgb(43, 217, 127);
-        v.selection.bg_fill =
-            egui::Color32::from_rgba_premultiplied(43, 217, 127, 80);
+        v.selection.bg_fill = egui::Color32::from_rgba_premultiplied(43, 217, 127, 80);
         v.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(43, 217, 127));
         v.override_text_color = Some(egui::Color32::from_rgb(234, 234, 234));
 
@@ -90,25 +90,30 @@ impl AudioRouterApp {
         v.widgets.noninteractive.corner_radius = cr8;
         v.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(14, 20, 29);
         v.widgets.noninteractive.weak_bg_fill = egui::Color32::from_rgb(17, 24, 35);
-        v.widgets.noninteractive.bg_stroke =
-            egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 255, 255, 12));
+        v.widgets.noninteractive.bg_stroke = egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_premultiplied(255, 255, 255, 12),
+        );
         v.widgets.noninteractive.fg_stroke =
             egui::Stroke::new(1.0, egui::Color32::from_rgb(140, 140, 140));
 
         v.widgets.inactive.corner_radius = cr8;
         v.widgets.inactive.bg_fill = egui::Color32::from_rgb(14, 20, 29);
-        v.widgets.inactive.bg_stroke =
-            egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 255, 255, 12));
+        v.widgets.inactive.bg_stroke = egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_premultiplied(255, 255, 255, 12),
+        );
 
         v.widgets.hovered.corner_radius = cr8;
         v.widgets.hovered.bg_fill = egui::Color32::from_rgb(17, 24, 35);
-        v.widgets.hovered.bg_stroke =
-            egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(43, 217, 127, 80));
+        v.widgets.hovered.bg_stroke = egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_premultiplied(43, 217, 127, 80),
+        );
 
         v.widgets.active.corner_radius = cr8;
         v.widgets.active.bg_fill = egui::Color32::from_rgb(20, 28, 40);
-        v.widgets.active.bg_stroke =
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(43, 217, 127));
+        v.widgets.active.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(43, 217, 127));
 
         cc.egui_ctx.set_style(style);
 
@@ -184,8 +189,7 @@ impl AudioRouterApp {
             .devices
             .iter()
             .filter(|d| {
-                d.id != source_id
-                    && cfg.outputs.iter().any(|o| o.device_id == d.id && o.enabled)
+                d.id != source_id && cfg.outputs.iter().any(|o| o.device_id == d.id && o.enabled)
             })
             .map(|d| d.id.clone())
             .collect();
@@ -263,13 +267,17 @@ impl AudioRouterApp {
             return;
         }
 
-        crate::autostart::set_autostart(self.draft_general.start_with_windows);
+        if let Err(e) = crate::autostart::set_autostart(self.draft_general.start_with_windows) {
+            self.status_text = format!("Error: {e}");
+            log::error!("Set autostart failed: {e}");
+            return;
+        }
 
         if new_language != self.i18n.locale() {
             self.i18n.set_locale(&new_language);
             let _ = self
                 .tray_tx
-                .send(TrayCommand::UpdateLanguage(new_language));
+                .send(AppToTrayCommand::UpdateLanguage(new_language));
         }
 
         self.show_settings = false;
@@ -278,17 +286,12 @@ impl AudioRouterApp {
     pub fn handle_tray_commands(&mut self, ctx: &egui::Context) {
         while let Ok(cmd) = self.tray_rx.try_recv() {
             match cmd {
-                TrayCommand::ShowWindow => {
-                    if !self.window_visible {
-                        self.request_window_show = true;
-                        ctx.request_repaint();
-                    }
+                TrayToAppCommand::ShowWindow => {
+                    self.request_window_show = true;
+                    ctx.request_repaint();
                 }
-                TrayCommand::Quit => {
+                TrayToAppCommand::Quit => {
                     self.app_exit = true;
-                }
-                TrayCommand::UpdateLanguage(lang) => {
-                    self.i18n.set_locale(&lang);
                 }
             }
         }
@@ -311,15 +314,24 @@ impl eframe::App for AudioRouterApp {
         }
 
         // 检查更新状态
-        if let Some(status) = ctx.data_mut(|d| d.remove_temp::<UpdateStatus>(egui::Id::new("update_status"))) {
+        if let Some(status) =
+            ctx.data_mut(|d| d.remove_temp::<UpdateStatus>(egui::Id::new("update_status")))
+        {
             self.update_status = status;
         }
 
         // 处理托盘命令
         self.handle_tray_commands(ctx);
 
+        if ctx.input(|i| i.viewport().close_requested()) && !self.app_exit {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.window_visible = false;
+            return;
+        }
+
         // 窗口显示控制
-        if self.request_window_show && !self.window_visible {
+        if self.request_window_show {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             self.request_window_show = false;

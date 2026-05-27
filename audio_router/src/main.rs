@@ -18,7 +18,7 @@ use config::ConfigManager;
 use eframe::egui;
 
 use app::AudioRouterApp;
-use tray::TrayCommand;
+use tray::{AppToTrayCommand, TrayToAppCommand};
 
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -27,21 +27,23 @@ fn main() -> eframe::Result {
 
     let cmd_minimized = std::env::args().any(|a| a == "--minimized");
 
-    let app_local_data_dir = dirs_data_dir();
-    let config_manager = ConfigManager::load(Some(app_local_data_dir))
-        .expect("Failed to load config");
+    let app_local_data_dir = app_config_dir();
+    let config_manager =
+        ConfigManager::load(Some(app_local_data_dir)).expect("Failed to load config");
 
     let cfg = config_manager.handle().read().clone();
+    let initial_window_visible = !cmd_minimized && !cfg.general.minimized;
 
     // 创建通信通道
-    let (tray_cmd_tx, tray_cmd_rx) = mpsc::channel::<TrayCommand>();
-    let (app_cmd_tx, app_cmd_rx) = mpsc::channel::<TrayCommand>();
+    let (tray_cmd_tx, tray_cmd_rx) = mpsc::channel::<AppToTrayCommand>();
+    let (app_cmd_tx, app_cmd_rx) = mpsc::channel::<TrayToAppCommand>();
 
     // 启动托盘线程
     let tx_for_tray = app_cmd_tx.clone();
+    let tray_locale = cfg.general.language.clone();
     std::thread::Builder::new()
         .name("tray-icon".into())
-        .spawn(move || tray::run_tray(tray_cmd_rx, tx_for_tray))
+        .spawn(move || tray::run_tray(tray_cmd_rx, tx_for_tray, tray_locale))
         .expect("Failed to spawn tray thread");
 
     let router = Router::new();
@@ -52,7 +54,7 @@ fn main() -> eframe::Result {
             .with_min_inner_size([700.0, 500.0])
             .with_resizable(true)
             .with_decorations(true)
-            .with_visible(!cmd_minimized && !cfg.general.minimized)
+            .with_visible(initial_window_visible)
             .with_title("AudioRouter"),
         ..Default::default()
     };
@@ -61,7 +63,7 @@ fn main() -> eframe::Result {
         native_options.viewport = native_options.viewport.with_icon(icon);
     }
 
-    let tray_tx = app_cmd_tx.clone();
+    let tray_tx = tray_cmd_tx.clone();
 
     eframe::run_native(
         "AudioRouter",
@@ -73,19 +75,23 @@ fn main() -> eframe::Result {
                 router,
                 app_cmd_rx,
                 tray_tx,
+                initial_window_visible,
             )))
         }),
     )?;
 
-    let _ = tray_cmd_tx.send(TrayCommand::Quit);
+    let _ = tray_cmd_tx.send(AppToTrayCommand::Quit);
     Ok(())
 }
 
-fn dirs_data_dir() -> std::path::PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
+fn app_config_dir() -> std::path::PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("APPDATA").map(std::path::PathBuf::from))
+        .unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        })
+        .join("AudioRouter")
 }
 
 fn load_window_icon() -> Option<egui::IconData> {
@@ -121,5 +127,9 @@ fn load_window_icon() -> Option<egui::IconData> {
             }
         }
     }
-    Some(egui::IconData { width: size, height: size, rgba })
+    Some(egui::IconData {
+        width: size,
+        height: size,
+        rgba,
+    })
 }
