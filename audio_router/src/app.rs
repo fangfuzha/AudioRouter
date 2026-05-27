@@ -4,7 +4,7 @@ use std::sync::mpsc;
 
 use audio_core::com_service::device::DeviceInfo;
 use audio_core::com_service::device::get_all_output_devices;
-use audio_core::router::{Router, RouterConfig};
+use audio_core::router::{ChannelMode, Router, RouterConfig, RouterTarget};
 use config::ConfigManager;
 use config::config::{General, Output};
 
@@ -135,16 +135,19 @@ impl AudioRouterApp {
 
         let cfg = self.config_manager.handle().read().clone();
         if cfg.general.auto_route && !cfg.source_device_id.is_empty() {
-            let enabled_targets: Vec<String> = cfg
+            let enabled_targets: Vec<RouterTarget> = cfg
                 .outputs
                 .iter()
                 .filter(|o| o.enabled)
-                .map(|o| o.device_id.clone())
+                .map(|o| RouterTarget {
+                    device_id: o.device_id.clone(),
+                    channel_mode: ChannelMode::from_config(o.channel_mode.as_deref()),
+                })
                 .collect();
             if !enabled_targets.is_empty() {
                 let router_cfg = RouterConfig {
                     source_device_id: Some(cfg.source_device_id.clone()),
-                    target_device_ids: enabled_targets,
+                    targets: enabled_targets,
                 };
                 if self.router.start(router_cfg).is_ok() {
                     self.is_running = true;
@@ -185,23 +188,31 @@ impl AudioRouterApp {
         };
 
         let cfg = self.config_manager.handle().read().clone();
-        let target_ids: Vec<String> = self
+        let targets: Vec<RouterTarget> = self
             .devices
             .iter()
-            .filter(|d| {
-                d.id != source_id && cfg.outputs.iter().any(|o| o.device_id == d.id && o.enabled)
+            .filter_map(|d| {
+                if d.id == source_id {
+                    return None;
+                }
+                cfg.outputs
+                    .iter()
+                    .find(|o| o.device_id == d.id && o.enabled)
+                    .map(|o| RouterTarget {
+                        device_id: d.id.clone(),
+                        channel_mode: ChannelMode::from_config(o.channel_mode.as_deref()),
+                    })
             })
-            .map(|d| d.id.clone())
             .collect();
 
-        if target_ids.is_empty() {
+        if targets.is_empty() {
             self.status_text = self.i18n.t("SelectDevice").to_string();
             return;
         }
 
         let router_cfg = RouterConfig {
             source_device_id: Some(source_id),
-            target_device_ids: target_ids,
+            targets,
         };
 
         self.status_text = self.i18n.t("Starting").to_string();

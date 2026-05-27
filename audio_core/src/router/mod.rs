@@ -7,7 +7,7 @@ mod config;
 mod state;
 mod worker;
 
-pub use config::RouterConfig;
+pub use config::{ChannelMode, RouterConfig, RouterTarget};
 pub use state::RouterState;
 
 use anyhow::{Result, anyhow};
@@ -195,7 +195,13 @@ mod tests {
         // 3. Configure Router
         let config = RouterConfig {
             source_device_id: Some(default_dev.id),
-            target_device_ids: target_ids,
+            targets: target_ids
+                .into_iter()
+                .map(|device_id| RouterTarget {
+                    device_id,
+                    channel_mode: ChannelMode::Stereo,
+                })
+                .collect(),
         };
 
         let router = Router::new();

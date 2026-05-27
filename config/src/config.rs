@@ -34,6 +34,44 @@ pub struct Output {
     pub channel_mode: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub enum ChannelMode {
+    #[default]
+    Stereo,
+    LeftMono,
+    RightMono,
+    Mono,
+    Swap,
+    LeftOnly,
+    RightOnly,
+}
+
+impl ChannelMode {
+    pub fn from_config(value: Option<&str>) -> Self {
+        match value {
+            Some("LeftMono") | Some("Left") => Self::LeftMono,
+            Some("RightMono") | Some("Right") => Self::RightMono,
+            Some("Mono") => Self::Mono,
+            Some("Swap") => Self::Swap,
+            Some("LeftOnly") => Self::LeftOnly,
+            Some("RightOnly") => Self::RightOnly,
+            _ => Self::Stereo,
+        }
+    }
+
+    pub fn as_config_str(self) -> &'static str {
+        match self {
+            Self::Stereo => "Stereo",
+            Self::LeftMono => "LeftMono",
+            Self::RightMono => "RightMono",
+            Self::Mono => "Mono",
+            Self::Swap => "Swap",
+            Self::LeftOnly => "LeftOnly",
+            Self::RightOnly => "RightOnly",
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }
