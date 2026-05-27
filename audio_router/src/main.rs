@@ -7,6 +7,7 @@ mod autostart;
 mod controller;
 mod fonts;
 mod i18n;
+mod slint_app;
 mod tray;
 mod update;
 mod views;
@@ -26,6 +27,7 @@ fn main() -> eframe::Result {
         .format_timestamp_micros()
         .init();
 
+    let cmd_slint = std::env::args().any(|a| a == "--slint");
     let cmd_minimized = std::env::args().any(|a| a == "--minimized");
 
     let app_local_data_dir = app_config_dir();
@@ -33,6 +35,14 @@ fn main() -> eframe::Result {
         ConfigManager::load(Some(app_local_data_dir)).expect("Failed to load config");
 
     let cfg = config_manager.handle().read().clone();
+
+    if cmd_slint {
+        if let Err(e) = slint_app::run_slint_app(config_manager, Router::new()) {
+            log::error!("Slint app failed: {e}");
+        }
+        return Ok(());
+    }
+
     let initial_window_visible = !cmd_minimized && !cfg.general.minimized;
 
     // 创建通信通道

@@ -36,3 +36,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 
 # 跨平台字体加载
 font-kit = "0.14"
+slint = "1.16.1"
+
+[build-dependencies]
+slint-build = "1.16.1"

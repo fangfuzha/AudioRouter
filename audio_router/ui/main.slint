@@ -1,0 +1,91 @@
+import { Button } from "std-widgets.slint";
+
+export component MainWindow inherits Window {
+    in property <string> status_text: "";
+    in property <int> device_count: 0;
+    in property <bool> is_running: false;
+    callback refresh_devices();
+    callback toggle_routing();
+
+    title: "AudioRouter";
+    width: 900px;
+    height: 720px;
+    background: #0b0f14;
+
+    VerticalLayout {
+        padding: 24px;
+        spacing: 18px;
+
+        HorizontalLayout {
+            height: 44px;
+            Text {
+                text: "AudioRouter";
+                color: #f0f3f7;
+                font-size: 22px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+            Rectangle { width: 1px; }
+            Button {
+                text: "刷新设备";
+                clicked => { root.refresh_devices(); }
+            }
+        }
+
+        Rectangle {
+            height: 1px;
+            background: #243041;
+        }
+
+        Rectangle {
+            background: #111827;
+            border-color: #243041;
+            border-width: 1px;
+            border-radius: 8px;
+
+            VerticalLayout {
+                padding: 20px;
+                spacing: 12px;
+
+                Text {
+                    text: "Slint 迁移预览";
+                    color: #f0f3f7;
+                    font-size: 18px;
+                    font-weight: 600;
+                }
+
+                Text {
+                    text: "当前先接入 Slint 窗口和控制层绑定，后续会迁移设备列表和设置页。";
+                    color: #9ca3af;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+
+                Text {
+                    text: "发现设备：" + root.device_count;
+                    color: #d1d5db;
+                    font-size: 14px;
+                }
+
+                Text {
+                    text: root.status_text;
+                    color: #9ca3af;
+                    font-size: 13px;
+                }
+
+                HorizontalLayout {
+                    spacing: 12px;
+                    Button {
+                        text: root.is_running ? "停止" : "启动";
+                        clicked => { root.toggle_routing(); }
+                    }
+                    Button {
+                        text: "刷新";
+                        clicked => { root.refresh_devices(); }
+                    }
+                }
+            }
+        }
+    }
+}
+
