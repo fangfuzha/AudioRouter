@@ -19,23 +19,18 @@ pub fn show(ctx: &egui::Context, app: &mut AudioRouterApp) {
             ui.add_space(16.0);
 
             ui.vertical(|ui| {
+                let start_with_windows = app.i18n.t("StartWithWindows").to_string();
                 setting_checkbox(
                     ui,
-                    app.i18n.t("StartWithWindows"),
+                    &start_with_windows,
                     &mut app.draft_general.start_with_windows,
                 );
                 ui.add_space(12.0);
-                setting_checkbox(
-                    ui,
-                    app.i18n.t("StartMinimized"),
-                    &mut app.draft_general.minimized,
-                );
+                let start_minimized = app.i18n.t("StartMinimized").to_string();
+                setting_checkbox(ui, &start_minimized, &mut app.draft_general.minimized);
                 ui.add_space(12.0);
-                setting_checkbox(
-                    ui,
-                    app.i18n.t("AutoRoute"),
-                    &mut app.draft_general.auto_route,
-                );
+                let auto_route = app.i18n.t("AutoRoute").to_string();
+                setting_checkbox(ui, &auto_route, &mut app.draft_general.auto_route);
                 ui.add_space(12.0);
 
                 // 语言选择

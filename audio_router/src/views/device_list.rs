@@ -33,8 +33,7 @@ pub fn show(ctx: &egui::Context, app: &mut AudioRouterApp) {
                         )
                         .clicked()
                     {
-                        let cfg = app.config_manager.handle().read().clone();
-                        app.draft_general = cfg.general.clone();
+                        app.begin_settings_edit();
                         app.show_settings = true;
                     }
                 });
@@ -90,8 +89,7 @@ pub fn show(ctx: &egui::Context, app: &mut AudioRouterApp) {
                                         )
                                         .clicked()
                                     {
-                                        app.selected_source = Some(id.clone());
-                                        app.save_routing_config();
+                                        app.select_source_device(id.clone());
                                     }
                                 }
                             });

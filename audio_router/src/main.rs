@@ -4,6 +4,7 @@
 
 mod app;
 mod autostart;
+mod controller;
 mod fonts;
 mod i18n;
 mod tray;

@@ -1,35 +1,25 @@
 //! 应用核心状态和 eframe::App 实现。
 
+use std::ops::{Deref, DerefMut};
 use std::sync::mpsc;
 
-use audio_core::com_service::device::DeviceInfo;
-use audio_core::com_service::device::get_all_output_devices;
-use audio_core::router::{ChannelMode, Router, RouterConfig, RouterTarget};
+use audio_core::router::Router;
 use config::ConfigManager;
-use config::config::{General, Output};
 
-use crate::i18n::I18n;
+use crate::controller::AppController;
 use crate::tray::{AppToTrayCommand, TrayToAppCommand};
 use crate::update::UpdateStatus;
 use crate::views;
 
 /// eframe 应用主状态
 pub struct AudioRouterApp {
-    pub config_manager: ConfigManager,
-    pub router: Router,
-    pub i18n: I18n,
-    pub devices: Vec<DeviceInfo>,
-    pub selected_source: Option<String>,
-    pub is_running: bool,
-    pub status_text: String,
+    pub controller: AppController,
     pub window_visible: bool,
     pub show_settings: bool,
     pub app_exit: bool,
     pub request_window_show: bool,
     pub tray_rx: mpsc::Receiver<TrayToAppCommand>,
     pub tray_tx: mpsc::Sender<AppToTrayCommand>,
-    pub update_status: UpdateStatus,
-    pub draft_general: General,
     pub initialized: bool,
 }
 
@@ -43,29 +33,15 @@ impl AudioRouterApp {
         initial_window_visible: bool,
     ) -> Self {
         Self::setup_style(cc);
-        let cfg = config_manager.handle().read().clone();
-        let locale = cfg.general.language.clone();
 
         Self {
-            config_manager,
-            router,
-            i18n: I18n::new(&locale),
-            devices: Vec::new(),
-            selected_source: if cfg.source_device_id.is_empty() {
-                None
-            } else {
-                Some(cfg.source_device_id.clone())
-            },
-            is_running: false,
-            status_text: String::new(),
+            controller: AppController::new(config_manager, router),
             window_visible: initial_window_visible,
             show_settings: false,
             app_exit: false,
             request_window_show: false,
             tray_rx,
             tray_tx,
-            update_status: UpdateStatus::Idle,
-            draft_general: cfg.general.clone(),
             initialized: false,
         }
     }
@@ -126,34 +102,7 @@ impl AudioRouterApp {
             return;
         }
         self.initialized = true;
-        self.refresh_devices();
-        self.is_running = self.router.is_running();
-
-        if self.devices.is_empty() {
-            self.status_text = self.i18n.t("NoDevices").to_string();
-        }
-
-        let cfg = self.config_manager.handle().read().clone();
-        if cfg.general.auto_route && !cfg.source_device_id.is_empty() {
-            let enabled_targets: Vec<RouterTarget> = cfg
-                .outputs
-                .iter()
-                .filter(|o| o.enabled)
-                .map(|o| RouterTarget {
-                    device_id: o.device_id.clone(),
-                    channel_mode: ChannelMode::from_config(o.channel_mode.as_deref()),
-                })
-                .collect();
-            if !enabled_targets.is_empty() {
-                let router_cfg = RouterConfig {
-                    source_device_id: Some(cfg.source_device_id.clone()),
-                    targets: enabled_targets,
-                };
-                if self.router.start(router_cfg).is_ok() {
-                    self.is_running = true;
-                }
-            }
-        }
+        self.controller.init();
 
         // 异步检查更新
         let ctx_clone = ctx.clone();
@@ -166,126 +115,8 @@ impl AudioRouterApp {
         });
     }
 
-    pub fn refresh_devices(&mut self) {
-        match get_all_output_devices() {
-            Ok(devices) => {
-                self.devices = devices;
-            }
-            Err(e) => {
-                log::error!("Failed to enumerate devices: {e}");
-                self.status_text = self.i18n.t("ErrorLoadingDevices").to_string();
-            }
-        }
-    }
-
-    pub fn start_routing(&mut self) {
-        let source_id = match &self.selected_source {
-            Some(id) if !id.is_empty() => id.clone(),
-            _ => {
-                self.status_text = self.i18n.t("SelectDevice").to_string();
-                return;
-            }
-        };
-
-        let cfg = self.config_manager.handle().read().clone();
-        let targets: Vec<RouterTarget> = self
-            .devices
-            .iter()
-            .filter_map(|d| {
-                if d.id == source_id {
-                    return None;
-                }
-                cfg.outputs
-                    .iter()
-                    .find(|o| o.device_id == d.id && o.enabled)
-                    .map(|o| RouterTarget {
-                        device_id: d.id.clone(),
-                        channel_mode: ChannelMode::from_config(o.channel_mode.as_deref()),
-                    })
-            })
-            .collect();
-
-        if targets.is_empty() {
-            self.status_text = self.i18n.t("SelectDevice").to_string();
-            return;
-        }
-
-        let router_cfg = RouterConfig {
-            source_device_id: Some(source_id),
-            targets,
-        };
-
-        self.status_text = self.i18n.t("Starting").to_string();
-        match self.router.start(router_cfg) {
-            Ok(()) => {
-                self.is_running = true;
-                let running_count = cfg.outputs.iter().filter(|o| o.enabled).count();
-                self.status_text = running_count.to_string();
-            }
-            Err(e) => {
-                self.status_text = format!("Error: {e}");
-                log::error!("Start routing failed: {e}");
-            }
-        }
-    }
-
-    pub fn stop_routing(&mut self) {
-        self.status_text = self.i18n.t("Stopping").to_string();
-        match self.router.stop() {
-            Ok(()) => {
-                self.is_running = false;
-                self.status_text = self.i18n.t("StatusReady").to_string();
-            }
-            Err(e) => {
-                self.status_text = format!("Error: {e}");
-                log::error!("Stop routing failed: {e}");
-            }
-        }
-    }
-
-    pub fn save_routing_config(&mut self) {
-        let source_id = self.selected_source.clone().unwrap_or_default();
-        let outputs: Vec<Output> = self
-            .devices
-            .iter()
-            .filter(|d| d.id != source_id)
-            .map(|d| {
-                let cfg = self.config_manager.handle().read().clone();
-                let existing = cfg.outputs.iter().find(|o| o.device_id == d.id);
-                Output {
-                    device_id: d.id.clone(),
-                    enabled: existing.map(|o| o.enabled).unwrap_or(false),
-                    channel_mode: existing.and_then(|o| o.channel_mode.clone()),
-                }
-            })
-            .collect();
-
-        if let Err(e) = self.config_manager.update(|cfg| {
-            cfg.source_device_id = source_id;
-            cfg.outputs = outputs;
-        }) {
-            log::error!("Save routing config failed: {e}");
-        }
-    }
-
     pub fn save_general_config(&mut self) {
-        let new_language = self.draft_general.language.clone();
-
-        if let Err(e) = self.config_manager.update(|cfg| {
-            cfg.general = self.draft_general.clone();
-        }) {
-            log::error!("Save general config failed: {e}");
-            return;
-        }
-
-        if let Err(e) = crate::autostart::set_autostart(self.draft_general.start_with_windows) {
-            self.status_text = format!("Error: {e}");
-            log::error!("Set autostart failed: {e}");
-            return;
-        }
-
-        if new_language != self.i18n.locale() {
-            self.i18n.set_locale(&new_language);
+        if let Some(new_language) = self.controller.save_general_config() {
             let _ = self
                 .tray_tx
                 .send(AppToTrayCommand::UpdateLanguage(new_language));
@@ -307,13 +138,19 @@ impl AudioRouterApp {
             }
         }
     }
+}
 
-    pub fn filtered_target_devices(&self) -> Vec<&DeviceInfo> {
-        let source_id = self.selected_source.as_deref();
-        self.devices
-            .iter()
-            .filter(|d| Some(d.id.as_str()) != source_id)
-            .collect()
+impl Deref for AudioRouterApp {
+    type Target = AppController;
+
+    fn deref(&self) -> &Self::Target {
+        &self.controller
+    }
+}
+
+impl DerefMut for AudioRouterApp {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.controller
     }
 }
 
@@ -328,7 +165,7 @@ impl eframe::App for AudioRouterApp {
         if let Some(status) =
             ctx.data_mut(|d| d.remove_temp::<UpdateStatus>(egui::Id::new("update_status")))
         {
-            self.update_status = status;
+            self.controller.set_update_status(status);
         }
 
         // 处理托盘命令

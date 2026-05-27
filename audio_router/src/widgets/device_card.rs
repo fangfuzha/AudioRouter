@@ -2,7 +2,6 @@
 
 use audio_core::com_service::device::DeviceInfo;
 use audio_core::router::ChannelMode;
-use config::config::Output;
 use egui::{Color32, CornerRadius, Stroke};
 
 use crate::app::AudioRouterApp;
@@ -46,18 +45,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut AudioRouterApp, device: &DeviceInfo) {
                 let mut new_enabled = enabled;
                 let cb = ui.add(egui::Checkbox::new(&mut new_enabled, ""));
                 if cb.clicked() {
-                    let device_id = device.id.clone();
-                    let _ = app.config_manager.update(|cfg| {
-                        if let Some(o) = cfg.outputs.iter_mut().find(|o| o.device_id == device_id) {
-                            o.enabled = new_enabled;
-                        } else {
-                            cfg.outputs.push(Output {
-                                device_id,
-                                enabled: new_enabled,
-                                channel_mode: Some("Stereo".to_string()),
-                            });
-                        }
-                    });
+                    app.set_output_enabled(&device.id, new_enabled);
                 }
 
                 ui.add_space(12.0);
@@ -90,25 +78,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut AudioRouterApp, device: &DeviceInfo) {
                             for (mode, key) in CHANNEL_MODES {
                                 let label = app.i18n.t(key);
                                 if ui.selectable_label(channel_mode == *mode, label).clicked() {
-                                    let device_id = device.id.clone();
-                                    let mode = *mode;
-                                    let _ = app.config_manager.update(|cfg| {
-                                        if let Some(o) = cfg
-                                            .outputs
-                                            .iter_mut()
-                                            .find(|o| o.device_id == device_id)
-                                        {
-                                            o.channel_mode = Some(mode.as_config_str().to_string());
-                                        } else {
-                                            cfg.outputs.push(Output {
-                                                device_id,
-                                                enabled: false,
-                                                channel_mode: Some(
-                                                    mode.as_config_str().to_string(),
-                                                ),
-                                            });
-                                        }
-                                    });
+                                    app.set_output_channel_mode(&device.id, *mode);
                                 }
                             }
                         });
