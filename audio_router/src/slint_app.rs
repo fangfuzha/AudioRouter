@@ -21,7 +21,11 @@ const CHANNEL_MODES: &[ChannelMode] = &[
     ChannelMode::RightOnly,
 ];
 
-pub fn run_slint_app(config_manager: ConfigManager, router: Router) -> anyhow::Result<()> {
+pub fn run_slint_app(
+    config_manager: ConfigManager,
+    router: Router,
+    tray_tx: Option<std::sync::mpsc::Sender<crate::tray::AppToTrayCommand>>,
+) -> anyhow::Result<()> {
     let ui = MainWindow::new()?;
     let controller = Rc::new(RefCell::new(AppController::new(config_manager, router)));
 
@@ -87,11 +91,53 @@ pub fn run_slint_app(config_manager: ConfigManager, router: Router) -> anyhow::R
         }
     });
 
+    let weak_ui = ui.as_weak();
+    let settings_controller = Rc::clone(&controller);
+    ui.on_open_settings(move || {
+        if let Some(ui) = weak_ui.upgrade() {
+            let mut controller = settings_controller.borrow_mut();
+            controller.begin_settings_edit();
+            update_main_window(&ui, &controller);
+            ui.set_show_settings(true);
+        }
+    });
+
+    let weak_ui = ui.as_weak();
+    ui.on_cancel_settings(move || {
+        if let Some(ui) = weak_ui.upgrade() {
+            ui.set_show_settings(false);
+        }
+    });
+
+    let weak_ui = ui.as_weak();
+    let save_controller = Rc::clone(&controller);
+    ui.on_save_settings(
+        move |start_with_windows, minimized, auto_route, language_index| {
+            if let Some(ui) = weak_ui.upgrade() {
+                let mut controller = save_controller.borrow_mut();
+                controller.draft_general.start_with_windows = start_with_windows;
+                controller.draft_general.minimized = minimized;
+                controller.draft_general.auto_route = auto_route;
+                controller.draft_general.language =
+                    language_code_from_index(language_index).to_string();
+                if let Some(new_language) = controller.save_general_config()
+                    && let Some(tray_tx) = &tray_tx
+                {
+                    let _ =
+                        tray_tx.send(crate::tray::AppToTrayCommand::UpdateLanguage(new_language));
+                }
+                ui.set_show_settings(false);
+                update_main_window(&ui, &controller);
+            }
+        },
+    );
+
     ui.run()?;
     Ok(())
 }
 
 fn update_main_window(ui: &MainWindow, controller: &AppController) {
+    ui.set_settings_state(settings_state(controller));
     ui.set_device_count(controller.devices.len() as i32);
     ui.set_is_running(controller.is_running);
     ui.set_status_text(controller.status_text.as_str().into());
@@ -164,4 +210,27 @@ fn channel_mode_label(controller: &AppController, channel_mode: ChannelMode) -> 
         ChannelMode::RightOnly => "channelModes.RightOnly",
     };
     controller.i18n.t(key).to_string()
+}
+
+fn settings_state(controller: &AppController) -> SettingsState {
+    SettingsState {
+        start_with_windows: controller.draft_general.start_with_windows,
+        minimized: controller.draft_general.minimized,
+        auto_route: controller.draft_general.auto_route,
+        language_index: language_index(&controller.draft_general.language),
+    }
+}
+
+fn language_index(language: &str) -> i32 {
+    match language {
+        "zh" => 1,
+        _ => 0,
+    }
+}
+
+fn language_code_from_index(index: i32) -> &'static str {
+    match index {
+        1 => "zh",
+        _ => "en",
+    }
 }

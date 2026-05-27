@@ -37,7 +37,7 @@ fn main() -> eframe::Result {
     let cfg = config_manager.handle().read().clone();
 
     if cmd_slint {
-        if let Err(e) = slint_app::run_slint_app(config_manager, Router::new()) {
+        if let Err(e) = slint_app::run_slint_app(config_manager, Router::new(), None) {
             log::error!("Slint app failed: {e}");
         }
         return Ok(());
