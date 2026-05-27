@@ -19,11 +19,23 @@ pub fn show(ctx: &egui::Context, app: &mut AudioRouterApp) {
             ui.add_space(16.0);
 
             ui.vertical(|ui| {
-                setting_checkbox(ui, app.i18n.t("StartWithWindows"), &mut app.draft_general.start_with_windows);
+                setting_checkbox(
+                    ui,
+                    app.i18n.t("StartWithWindows"),
+                    &mut app.draft_general.start_with_windows,
+                );
                 ui.add_space(12.0);
-                setting_checkbox(ui, app.i18n.t("StartMinimized"), &mut app.draft_general.minimized);
+                setting_checkbox(
+                    ui,
+                    app.i18n.t("StartMinimized"),
+                    &mut app.draft_general.minimized,
+                );
                 ui.add_space(12.0);
-                setting_checkbox(ui, app.i18n.t("AutoRoute"), &mut app.draft_general.auto_route);
+                setting_checkbox(
+                    ui,
+                    app.i18n.t("AutoRoute"),
+                    &mut app.draft_general.auto_route,
+                );
                 ui.add_space(12.0);
 
                 // 语言选择
@@ -62,10 +74,13 @@ pub fn show(ctx: &egui::Context, app: &mut AudioRouterApp) {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
                         .add(
-                            egui::Button::new(egui::RichText::new(app.i18n.t("Cancel")).color(Color32::from_rgb(140, 140, 140)))
-                                .fill(Color32::from_rgb(17, 24, 35))
-                                .corner_radius(CornerRadius::same(12))
-                                .min_size(egui::Vec2::new(100.0, 40.0)),
+                            egui::Button::new(
+                                egui::RichText::new(app.i18n.t("Cancel"))
+                                    .color(Color32::from_rgb(140, 140, 140)),
+                            )
+                            .fill(Color32::from_rgb(17, 24, 35))
+                            .corner_radius(CornerRadius::same(12))
+                            .min_size(egui::Vec2::new(100.0, 40.0)),
                         )
                         .clicked()
                     {
@@ -76,10 +91,14 @@ pub fn show(ctx: &egui::Context, app: &mut AudioRouterApp) {
 
                     if ui
                         .add(
-                            egui::Button::new(egui::RichText::new(app.i18n.t("Save")).color(Color32::from_rgb(11, 15, 20)).strong())
-                                .fill(Color32::from_rgb(43, 217, 127))
-                                .corner_radius(CornerRadius::same(12))
-                                .min_size(egui::Vec2::new(100.0, 40.0)),
+                            egui::Button::new(
+                                egui::RichText::new(app.i18n.t("Save"))
+                                    .color(Color32::from_rgb(11, 15, 20))
+                                    .strong(),
+                            )
+                            .fill(Color32::from_rgb(43, 217, 127))
+                            .corner_radius(CornerRadius::same(12))
+                            .min_size(egui::Vec2::new(100.0, 40.0)),
                         )
                         .clicked()
                     {
@@ -96,7 +115,11 @@ pub fn show(ctx: &egui::Context, app: &mut AudioRouterApp) {
 
 fn setting_checkbox(ui: &mut egui::Ui, label: &str, value: &mut bool) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(label).size(14.0).color(Color32::from_rgb(234, 234, 234)));
+        ui.label(
+            egui::RichText::new(label)
+                .size(14.0)
+                .color(Color32::from_rgb(234, 234, 234)),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add(egui::Checkbox::new(value, ""));
         });

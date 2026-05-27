@@ -26,7 +26,11 @@ pub fn show(ctx: &egui::Context, app: &mut AudioRouterApp) {
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
-                        .button(egui::RichText::new(app.i18n.t("Settings")).size(12.0).color(Color32::from_rgb(140, 140, 140)))
+                        .button(
+                            egui::RichText::new(app.i18n.t("Settings"))
+                                .size(12.0)
+                                .color(Color32::from_rgb(140, 140, 140)),
+                        )
                         .clicked()
                     {
                         let cfg = app.config_manager.handle().read().clone();
@@ -45,67 +49,80 @@ pub fn show(ctx: &egui::Context, app: &mut AudioRouterApp) {
             ..Default::default()
         })
         .show(ctx, |ui| {
-            egui::ScrollArea::vertical().id_salt("main_scroll").show(ui, |ui| {
-                // --- 源设备选择 ---
-                ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new(app.i18n.t("SourceDevice"))
-                            .size(10.0)
-                            .color(Color32::from_rgb(140, 140, 140))
-                            .strong(),
-                    );
-                    ui.add_space(8.0);
+            egui::ScrollArea::vertical()
+                .id_salt("main_scroll")
+                .show(ui, |ui| {
+                    // --- 源设备选择 ---
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new(app.i18n.t("SourceDevice"))
+                                .size(10.0)
+                                .color(Color32::from_rgb(140, 140, 140))
+                                .strong(),
+                        );
+                        ui.add_space(8.0);
 
-                    let source_text = app
-                        .selected_source
-                        .as_ref()
-                        .and_then(|id| app.devices.iter().find(|d| d.id == *id))
-                        .map(|d| d.friendly_name.as_str())
-                        .unwrap_or("");
+                        let source_text = app
+                            .selected_source
+                            .as_ref()
+                            .and_then(|id| app.devices.iter().find(|d| d.id == *id))
+                            .map(|d| d.friendly_name.as_str())
+                            .unwrap_or("");
 
-                    let app_devices: Vec<_> = app.devices.iter().map(|d| (d.id.clone(), d.friendly_name.clone())).collect();
-                    let app_selected_source = app.selected_source.clone();
-                    egui::ComboBox::new("source_device", "")
-                        .selected_text(egui::RichText::new(source_text).color(Color32::from_rgb(234, 234, 234)))
-                        .width(280.0)
-                        .show_ui(ui, |ui| {
-                            for (id, name) in &app_devices {
-                                if ui
-                                    .selectable_label(
-                                        app_selected_source.as_deref() == Some(id.as_str()),
-                                        name,
-                                    )
-                                    .clicked()
-                                {
-                                    app.selected_source = Some(id.clone());
-                                    app.save_routing_config();
+                        let app_devices: Vec<_> = app
+                            .devices
+                            .iter()
+                            .map(|d| (d.id.clone(), d.friendly_name.clone()))
+                            .collect();
+                        let app_selected_source = app.selected_source.clone();
+                        egui::ComboBox::new("source_device", "")
+                            .selected_text(
+                                egui::RichText::new(source_text)
+                                    .color(Color32::from_rgb(234, 234, 234)),
+                            )
+                            .width(280.0)
+                            .show_ui(ui, |ui| {
+                                for (id, name) in &app_devices {
+                                    if ui
+                                        .selectable_label(
+                                            app_selected_source.as_deref() == Some(id.as_str()),
+                                            name,
+                                        )
+                                        .clicked()
+                                    {
+                                        app.selected_source = Some(id.clone());
+                                        app.save_routing_config();
+                                    }
                                 }
+                            });
+                    });
+
+                    ui.add_space(24.0);
+
+                    // --- 输出设备列表 ---
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new(app.i18n.t("OutputDevices"))
+                                .size(10.0)
+                                .color(Color32::from_rgb(140, 140, 140))
+                                .strong(),
+                        );
+                        ui.add_space(8.0);
+
+                        let filtered: Vec<DeviceInfo> =
+                            app.filtered_target_devices().into_iter().cloned().collect();
+                        if filtered.is_empty() {
+                            ui.label(
+                                egui::RichText::new(app.i18n.t("NoDevices"))
+                                    .color(Color32::from_rgb(140, 140, 140)),
+                            );
+                        } else {
+                            for device in &filtered {
+                                crate::widgets::device_card::show(ui, app, &device);
                             }
-                        });
-                });
-
-                ui.add_space(24.0);
-
-                // --- 输出设备列表 ---
-                ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new(app.i18n.t("OutputDevices"))
-                            .size(10.0)
-                            .color(Color32::from_rgb(140, 140, 140))
-                            .strong(),
-                    );
-                    ui.add_space(8.0);
-
-                    let filtered: Vec<DeviceInfo> = app.filtered_target_devices().into_iter().cloned().collect();
-                    if filtered.is_empty() {
-                        ui.label(egui::RichText::new(app.i18n.t("NoDevices")).color(Color32::from_rgb(140, 140, 140)));
-                    } else {
-                        for device in &filtered {
-                            crate::widgets::device_card::show(ui, app, &device);
                         }
-                    }
+                    });
                 });
-            });
         });
 
     // ========== 底部状态栏 ==========
@@ -118,14 +135,22 @@ pub fn show(ctx: &egui::Context, app: &mut AudioRouterApp) {
         })
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(&app.status_text).size(12.0).color(Color32::from_rgb(140, 140, 140)));
+                ui.label(
+                    egui::RichText::new(&app.status_text)
+                        .size(12.0)
+                        .color(Color32::from_rgb(140, 140, 140)),
+                );
 
                 match &app.update_status {
                     crate::update::UpdateStatus::Available { latest_version, .. } => {
                         ui.label(
-                            egui::RichText::new(format!("{} v{}", app.i18n.t("UpdateAvailable"), latest_version))
-                                .size(12.0)
-                                .color(Color32::from_rgb(43, 217, 127)),
+                            egui::RichText::new(format!(
+                                "{} v{}",
+                                app.i18n.t("UpdateAvailable"),
+                                latest_version
+                            ))
+                            .size(12.0)
+                            .color(Color32::from_rgb(43, 217, 127)),
                         );
                     }
                     crate::update::UpdateStatus::Checking => {
@@ -147,10 +172,15 @@ pub fn show(ctx: &egui::Context, app: &mut AudioRouterApp) {
 
                     if ui
                         .add(
-                            egui::Button::new(egui::RichText::new(btn_text).size(13.0).color(Color32::from_rgb(11, 15, 20)).strong())
-                                .fill(btn_color)
-                                .corner_radius(CornerRadius::same(12))
-                                .min_size(Vec2::new(80.0, 36.0)),
+                            egui::Button::new(
+                                egui::RichText::new(btn_text)
+                                    .size(13.0)
+                                    .color(Color32::from_rgb(11, 15, 20))
+                                    .strong(),
+                            )
+                            .fill(btn_color)
+                            .corner_radius(CornerRadius::same(12))
+                            .min_size(Vec2::new(80.0, 36.0)),
                         )
                         .clicked()
                     {
@@ -164,7 +194,11 @@ pub fn show(ctx: &egui::Context, app: &mut AudioRouterApp) {
                     ui.add_space(8.0);
 
                     if ui
-                        .button(egui::RichText::new(app.i18n.t("RefreshDevices")).size(12.0).color(Color32::from_rgb(140, 140, 140)))
+                        .button(
+                            egui::RichText::new(app.i18n.t("RefreshDevices"))
+                                .size(12.0)
+                                .color(Color32::from_rgb(140, 140, 140)),
+                        )
                         .clicked()
                     {
                         app.refresh_devices();

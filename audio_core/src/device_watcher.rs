@@ -6,7 +6,7 @@
 //! through a channel for easy consumption by other parts of the application.
 
 use anyhow::Result;
-use std::sync::mpsc::{self, RecvTimeoutError, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
 use windows::core::implement;
@@ -160,10 +160,7 @@ impl Drop for DeviceWatcher {
 }
 
 /// Main watcher thread function.
-fn watcher_thread(
-    event_tx: Sender<DeviceEvent>,
-    stop_rx: Receiver<()>,
-) -> Result<()> {
+fn watcher_thread(event_tx: Sender<DeviceEvent>, stop_rx: Receiver<()>) -> Result<()> {
     let enumerator = crate::com_service::watcher::create_enumerator()?;
 
     // Create the COM notification client
