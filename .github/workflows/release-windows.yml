@@ -47,11 +47,14 @@ jobs:
           }
           echo "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
 
+      - name: Checkout release tag
+        shell: pwsh
+        run: git checkout --detach $env:RELEASE_TAG
+
       - name: Setup Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
+          components: rustfmt, clippy
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -71,7 +74,7 @@ jobs:
 
       - name: Build audio_router (release)
         # 使用 cargo 构建原生 Windows 二进制（无 WebView/Node.js 依赖）
-        run: cargo build --release --package audio_router
+        run: cargo build --locked --release --package audio_router
 
       - name: Decode & import PFX (only if provided)
         if: ${{ env.WINDOWS_SIGN_CERT && env.WINDOWS_SIGN_PASSWORD }}
@@ -87,7 +90,15 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "Signing exe"
-          & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.17763.0\x86\signtool.exe" sign /v /fd SHA256 /a /tr http://timestamp.digicert.com /td SHA256 "target\release\audio_router.exe"
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signtool) {
+            Write-Error "signtool.exe not found"
+            exit 1
+          }
+          & $signtool.FullName sign /v /fd SHA256 /a /tr http://timestamp.digicert.com /td SHA256 "target\release\audio_router.exe"
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2

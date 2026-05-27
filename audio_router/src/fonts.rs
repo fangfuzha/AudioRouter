@@ -41,7 +41,7 @@ pub fn setup_chinese_font(ctx: &egui::Context) {
 
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
-        format!("{name}").clone(),
+        name.to_string(),
         std::sync::Arc::new(egui::FontData::from_owned(font_bytes)),
     );
 
@@ -50,13 +50,13 @@ pub fn setup_chinese_font(ctx: &egui::Context) {
         .families
         .entry(egui::FontFamily::Proportional)
         .or_default()
-        .push(format!("{name}").clone());
+        .push(name.to_string());
 
     fonts
         .families
         .entry(egui::FontFamily::Monospace)
         .or_default()
-        .push(format!("{name}"));
+        .push(name.to_string());
 
     ctx.set_fonts(fonts);
     log::info!("CJK font loaded and registered with egui: {name}");

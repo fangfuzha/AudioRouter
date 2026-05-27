@@ -168,7 +168,7 @@ pub fn initialize_router(
 
     let mut render_services = Vec::new();
     for (device_id, render_client) in render_clients {
-        match initialize_render_client_internal(&render_client, pwf) {
+        match initialize_render_client_internal(render_client, pwf) {
             Ok(service) => {
                 render_services.push(service);
             }

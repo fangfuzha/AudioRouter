@@ -143,26 +143,25 @@ fn get_device_info_internal(
     let state = unsafe { device.GetState().unwrap_or(0) };
 
     let mut friendly_name = id.clone();
-    if let Ok(store) = unsafe { device.OpenPropertyStore(STGM_READ) } {
-        if let Some(s) =
+    if let Ok(store) = unsafe { device.OpenPropertyStore(STGM_READ) }
+        && let Some(s) =
             unsafe { win_helpers::read_property_string(&store, &win_helpers::PKEY_DEVICE_FRIENDLY) }
-        {
-            friendly_name = s;
-        }
+    {
+        friendly_name = s;
     }
 
     let mut channels = None;
     let mut channel_mask = None;
-    if let Ok(audio_client) = unsafe { device.Activate::<IAudioClient>(CLSCTX_ALL, None) } {
-        if let Ok(pwf) = unsafe { audio_client.GetMixFormat() } {
-            let (ch, mask) = crate::utils::parse_mix_format(pwf);
-            channels = ch;
-            channel_mask = mask;
-        }
+    if let Ok(audio_client) = unsafe { device.Activate::<IAudioClient>(CLSCTX_ALL, None) }
+        && let Ok(pwf) = unsafe { audio_client.GetMixFormat() }
+    {
+        let (ch, mask) = unsafe { crate::utils::parse_mix_format(pwf) };
+        channels = ch;
+        channel_mask = mask;
     }
 
     // Determine if this is the default device by comparing IDs. Note that `default_device_id` may be None if we failed to get it, in which case we'll just mark all devices as non-default.
-    let is_default = default_device_id.map_or(false, |d| d == id);
+    let is_default = default_device_id.is_some_and(|d| d == id);
 
     Ok(DeviceInfo {
         id,
@@ -224,6 +223,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
+    #[ignore = "requires real Windows audio devices"]
     fn device_api_behaves() {
         // Windows-only integration test: enumerate devices and print details for inspection.
         let devices = get_all_output_devices().expect("list devices");

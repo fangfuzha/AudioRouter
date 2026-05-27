@@ -99,18 +99,17 @@ fn load_window_icon() -> Option<egui::IconData> {
         .ok()
         .and_then(|p| p.parent().map(|p| p.join("icon.png")));
 
-    if let Some(ref path) = path {
-        if path.exists() {
-            if let Ok(img) = image::open(path) {
-                let rgba = img.to_rgba8();
-                let (w, h) = rgba.dimensions();
-                return Some(egui::IconData {
-                    width: w,
-                    height: h,
-                    rgba: rgba.into_raw(),
-                });
-            }
-        }
+    if let Some(ref path) = path
+        && path.exists()
+        && let Ok(img) = image::open(path)
+    {
+        let rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        return Some(egui::IconData {
+            width: w,
+            height: h,
+            rgba: rgba.into_raw(),
+        });
     }
 
     // fallback 绿色图标

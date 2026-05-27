@@ -56,6 +56,11 @@ pub mod win_helpers {
     }
 
     /// Reads a device property string from the property store.
+    ///
+    /// # Safety
+    ///
+    /// `store` must be a valid COM property store used on a thread whose COM
+    /// apartment is initialized. The property value is cleared before return.
     pub unsafe fn read_property_string(
         store: &IPropertyStore,
         key: &PROPERTYKEY,
@@ -70,10 +75,10 @@ pub mod win_helpers {
                     len += 1;
                 }
                 let slice = unsafe { std::slice::from_raw_parts(raw, len) };
-                if let Ok(s) = String::from_utf16(slice) {
-                    if !s.is_empty() {
-                        result = Some(s);
-                    }
+                if let Ok(s) = String::from_utf16(slice)
+                    && !s.is_empty()
+                {
+                    result = Some(s);
                 }
             }
             unsafe { PropVariantClear(&mut pv) };
@@ -165,7 +170,12 @@ pub fn decode_channel_mask(mask: u32) -> Vec<&'static str> {
 /// Parses a WAVEFORMATEX pointer returned by `IAudioClient::GetMixFormat`.
 ///
 /// Returns a tuple of `(channels, channel_mask)`. The pointer is freed via CoTaskMemFree.
-pub fn parse_mix_format(
+///
+/// # Safety
+///
+/// `pwf` must either be null or point to a valid `WAVEFORMATEX` buffer returned
+/// by `IAudioClient::GetMixFormat`. This function always frees non-null input.
+pub unsafe fn parse_mix_format(
     pwf: *const windows::Win32::Media::Audio::WAVEFORMATEX,
 ) -> (Option<u16>, Option<u32>) {
     use windows::Win32::Media::Audio::WAVEFORMATEX;
@@ -182,13 +192,13 @@ pub fn parse_mix_format(
         if (*pwf).wFormatTag == WAVE_FORMAT_EXTENSIBLE {
             #[allow(non_snake_case)]
             #[repr(C)]
-            struct WAVEFORMATEXTENSIBLE {
+            struct WaveFormatExtensible {
                 wf: WAVEFORMATEX,
                 wValidBitsPerSample: u16,
                 dwChannelMask: u32,
                 SubFormat: windows::core::GUID,
             }
-            let ext = pwf as *const WAVEFORMATEXTENSIBLE;
+            let ext = pwf as *const WaveFormatExtensible;
             channel_mask = Some((*ext).dwChannelMask);
         }
 

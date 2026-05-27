@@ -107,16 +107,16 @@ fn load_tray_icon() -> Option<tray_icon::Icon> {
         .ok()
         .and_then(|p| p.parent().map(|p| p.join("icon.png")));
 
-    if let Some(ref path) = icon_path {
-        if path.exists() {
-            match image::open(path) {
-                Ok(img) => {
-                    let rgba = img.to_rgba8();
-                    let (w, h) = rgba.dimensions();
-                    return tray_icon::Icon::from_rgba(rgba.into_raw(), w, h).ok();
-                }
-                Err(e) => log::warn!("Failed to load tray icon: {e}"),
+    if let Some(ref path) = icon_path
+        && path.exists()
+    {
+        match image::open(path) {
+            Ok(img) => {
+                let rgba = img.to_rgba8();
+                let (w, h) = rgba.dimensions();
+                return tray_icon::Icon::from_rgba(rgba.into_raw(), w, h).ok();
             }
+            Err(e) => log::warn!("Failed to load tray icon: {e}"),
         }
     }
 

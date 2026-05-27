@@ -118,7 +118,7 @@ pub fn show(ctx: &egui::Context, app: &mut AudioRouterApp) {
                             );
                         } else {
                             for device in &filtered {
-                                crate::widgets::device_card::show(ui, app, &device);
+                                crate::widgets::device_card::show(ui, app, device);
                             }
                         }
                     });

@@ -206,6 +206,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires real Windows audio device notifications"]
     fn test_watcher_start_and_stop() {
         let (mut watcher, rx) = DeviceWatcher::start().expect("start watcher");
 

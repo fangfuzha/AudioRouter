@@ -4,8 +4,9 @@ use serde::Deserialize;
 
 /// 更新检查状态
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum UpdateStatus {
+    #[default]
     Idle,
     Checking,
     Available {
@@ -14,12 +15,6 @@ pub enum UpdateStatus {
     },
     UpToDate,
     Error(String),
-}
-
-impl Default for UpdateStatus {
-    fn default() -> Self {
-        Self::Idle
-    }
 }
 
 #[derive(Debug, Deserialize)]
