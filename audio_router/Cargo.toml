@@ -4,9 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# GUI
-eframe = "0.31"
-egui = "0.31"
 
 # 原有核心库
 audio_core = { path = "../audio_core" }
@@ -33,9 +30,6 @@ env_logger = "0.11"
 
 # 图像加载（托盘图标、窗口图标）
 image = { version = "0.25", default-features = false, features = ["png"] }
-
-# 跨平台字体加载
-font-kit = "0.14"
 slint = "1.16.1"
 
 [build-dependencies]

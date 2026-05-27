@@ -53,6 +53,7 @@ component SettingsRow inherits HorizontalLayout {
 
 export component MainWindow inherits Window {
     in property <string> status-text: "";
+    in property <string> update-text: "";
     in property <int> device-count: 0;
     in property <bool> is-running: false;
     in-out property <bool> show-settings: false;
@@ -206,6 +207,13 @@ export component MainWindow inherits Window {
                     overflow: elide;
                 }
                 Text {
+                    text: root.update-text;
+                    color: #2bd97f;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Text {
                     text: "设备：" + root.device-count;
                     color: #6b7280;
                     font-size: 12px;
@@ -300,4 +308,5 @@ export component MainWindow inherits Window {
         }
     }
 }
+
 

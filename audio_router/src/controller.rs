@@ -6,7 +6,6 @@ use config::ConfigManager;
 use config::config::{General, Output};
 
 use crate::i18n::I18n;
-use crate::update::UpdateStatus;
 
 /// 应用业务状态和操作入口。
 pub struct AppController {
@@ -17,7 +16,6 @@ pub struct AppController {
     pub selected_source: Option<String>,
     pub is_running: bool,
     pub status_text: String,
-    pub update_status: UpdateStatus,
     pub draft_general: General,
     initialized: bool,
 }
@@ -39,7 +37,6 @@ impl AppController {
             },
             is_running: false,
             status_text: String::new(),
-            update_status: UpdateStatus::Idle,
             draft_general: cfg.general.clone(),
             initialized: false,
         }
@@ -58,10 +55,6 @@ impl AppController {
         }
 
         self.start_auto_route_if_enabled();
-    }
-
-    pub fn set_update_status(&mut self, status: UpdateStatus) {
-        self.update_status = status;
     }
 
     pub fn refresh_devices(&mut self) {

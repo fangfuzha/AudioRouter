@@ -44,11 +44,6 @@ impl I18n {
     pub fn t<'a>(&'a self, key: &'a str) -> &'a str {
         self.strings.get(key).copied().unwrap_or(key)
     }
-
-    /// 获取可用语言列表
-    pub fn available_languages() -> Vec<(&'static str, &'static str)> {
-        vec![("en", "English"), ("zh", "简体中文")]
-    }
 }
 
 /// 翻译宏，便捷调用

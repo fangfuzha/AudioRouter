@@ -120,19 +120,19 @@ fn load_tray_icon() -> Option<tray_icon::Icon> {
         }
     }
 
-    // 生成绿色圆点
-    let size = 32u32;
-    let mut pixels = Vec::with_capacity((size * size * 4) as usize);
-    for y in 0..size {
-        for x in 0..size {
-            let cx = x as f32 - size as f32 / 2.0;
-            let cy = y as f32 - size as f32 / 2.0;
-            if (cx * cx + cy * cy).sqrt() < size as f32 * 0.425 {
-                pixels.extend_from_slice(&[43, 217, 127, 255]);
-            } else {
-                pixels.extend_from_slice(&[0, 0, 0, 0]);
-            }
+    load_icon_from_png_bytes(include_bytes!("../assets/icon.png"))
+}
+
+fn load_icon_from_png_bytes(bytes: &[u8]) -> Option<tray_icon::Icon> {
+    match image::load_from_memory(bytes) {
+        Ok(img) => {
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            tray_icon::Icon::from_rgba(rgba.into_raw(), w, h).ok()
+        }
+        Err(e) => {
+            log::error!("Failed to load embedded tray icon: {e}");
+            None
         }
     }
-    tray_icon::Icon::from_rgba(pixels, size, size).ok()
 }

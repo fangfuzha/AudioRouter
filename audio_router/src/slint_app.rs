@@ -1,13 +1,16 @@
-//! Slint 前端入口。当前作为迁移中的独立 UI 壳，后续会替换 egui 入口。
+//! Slint 前端入口。
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::mpsc;
 
 use audio_core::router::{ChannelMode, Router};
 use config::ConfigManager;
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{CloseRequestResponse, ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::controller::AppController;
+use crate::tray::{AppToTrayCommand, TrayToAppCommand};
+use crate::update::UpdateStatus;
 
 slint::include_modules!();
 
@@ -24,10 +27,26 @@ const CHANNEL_MODES: &[ChannelMode] = &[
 pub fn run_slint_app(
     config_manager: ConfigManager,
     router: Router,
-    tray_tx: Option<std::sync::mpsc::Sender<crate::tray::AppToTrayCommand>>,
+    tray_rx: mpsc::Receiver<TrayToAppCommand>,
+    tray_tx: mpsc::Sender<AppToTrayCommand>,
+    initial_window_visible: bool,
 ) -> anyhow::Result<()> {
     let ui = MainWindow::new()?;
     let controller = Rc::new(RefCell::new(AppController::new(config_manager, router)));
+
+    ui.window().on_close_requested({
+        let weak_ui = ui.as_weak();
+        move || {
+            if let Some(ui) = weak_ui.upgrade() {
+                let _ = ui.hide();
+            }
+            CloseRequestResponse::KeepWindowShown
+        }
+    });
+
+    spawn_tray_command_bridge(ui.as_weak(), tray_rx)?;
+    spawn_update_check(ui.as_weak())?;
+    register_callbacks(&ui, Rc::clone(&controller), tray_tx);
 
     {
         let mut controller = controller.borrow_mut();
@@ -35,6 +54,72 @@ pub fn run_slint_app(
         update_main_window(&ui, &controller);
     }
 
+    if initial_window_visible {
+        ui.show()?;
+    }
+
+    slint::run_event_loop()?;
+    Ok(())
+}
+
+fn spawn_tray_command_bridge(
+    weak_ui: slint::Weak<MainWindow>,
+    tray_rx: mpsc::Receiver<TrayToAppCommand>,
+) -> anyhow::Result<()> {
+    std::thread::Builder::new()
+        .name("slint-tray-commands".into())
+        .spawn(move || {
+            while let Ok(cmd) = tray_rx.recv() {
+                let should_quit = matches!(cmd, TrayToAppCommand::Quit);
+                let weak_ui = weak_ui.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak_ui.upgrade() {
+                        match cmd {
+                            TrayToAppCommand::ShowWindow => {
+                                let _ = ui.show();
+                            }
+                            TrayToAppCommand::Quit => {
+                                let _ = ui.hide();
+                                let _ = slint::quit_event_loop();
+                            }
+                        }
+                    }
+                });
+                if should_quit {
+                    break;
+                }
+            }
+        })?;
+    Ok(())
+}
+
+fn spawn_update_check(weak_ui: slint::Weak<MainWindow>) -> anyhow::Result<()> {
+    std::thread::Builder::new()
+        .name("update-check".into())
+        .spawn(move || {
+            let status = crate::update::check_for_update();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak_ui.upgrade() {
+                    ui.set_update_text(update_status_text(&status).into());
+                }
+            });
+        })?;
+    Ok(())
+}
+
+fn update_status_text(status: &UpdateStatus) -> String {
+    match status {
+        UpdateStatus::Available { latest_version, .. } => format!("发现新版本 {latest_version}"),
+        UpdateStatus::Checking => "正在检查更新...".to_string(),
+        UpdateStatus::Error(e) => format!("更新检查失败：{e}"),
+        UpdateStatus::Idle | UpdateStatus::UpToDate => String::new(),
+    }
+}
+fn register_callbacks(
+    ui: &MainWindow,
+    controller: Rc<RefCell<AppController>>,
+    tray_tx: mpsc::Sender<AppToTrayCommand>,
+) {
     let weak_ui = ui.as_weak();
     let refresh_controller = Rc::clone(&controller);
     ui.on_refresh_devices(move || {
@@ -120,20 +205,14 @@ pub fn run_slint_app(
                 controller.draft_general.auto_route = auto_route;
                 controller.draft_general.language =
                     language_code_from_index(language_index).to_string();
-                if let Some(new_language) = controller.save_general_config()
-                    && let Some(tray_tx) = &tray_tx
-                {
-                    let _ =
-                        tray_tx.send(crate::tray::AppToTrayCommand::UpdateLanguage(new_language));
+                if let Some(new_language) = controller.save_general_config() {
+                    let _ = tray_tx.send(AppToTrayCommand::UpdateLanguage(new_language));
                 }
                 ui.set_show_settings(false);
                 update_main_window(&ui, &controller);
             }
         },
     );
-
-    ui.run()?;
-    Ok(())
 }
 
 fn update_main_window(ui: &MainWindow, controller: &AppController) {
