@@ -60,6 +60,21 @@ export component MainWindow inherits Window {
     in property <[SourceDevice]> source-devices;
     in property <[DeviceRow]> output-devices;
     in property <[string]> channel-mode-options;
+    in property <string> i18n-status-running: "";
+    in property <string> i18n-status-ready: "";
+    in property <string> i18n-device-count-text: "";
+    in property <string> i18n-settings: "";
+    in property <string> i18n-settings-title: "";
+    in property <string> i18n-source-device: "";
+    in property <string> i18n-output-devices: "";
+    in property <string> i18n-start: "";
+    in property <string> i18n-stop: "";
+    in property <string> i18n-start-with-windows: "";
+    in property <string> i18n-start-minimized: "";
+    in property <string> i18n-auto-route: "";
+    in property <string> i18n-language: "";
+    in property <string> i18n-cancel: "";
+    in property <string> i18n-save: "";
     callback toggle-routing();
     callback select-source(string);
     callback set-output-enabled(string, bool);
@@ -91,23 +106,31 @@ export component MainWindow inherits Window {
                 font-weight: 700;
                 vertical-alignment: center;
             }
+
             Text {
-                text: root.is-running ? "运行中" : "就绪";
+                text: root.is-running ? root.i18n-status-running : root.i18n-status-ready;
                 color: root.is-running ? #2bd97f : #9ca3af;
                 font-size: 13px;
                 vertical-alignment: center;
             }
-            Rectangle { horizontal-stretch: 1; }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
             Text {
-                text: "设备：" + root.device-count;
+                text: root.i18n-device-count-text;
                 color: #6b7280;
                 font-size: 12px;
                 vertical-alignment: center;
             }
+
             Button {
                 width: 82px;
-                text: "设置";
-                clicked => { root.open-settings(); }
+                text: root.i18n-settings;
+                clicked => {
+                    root.open-settings();
+                }
             }
         }
 
@@ -119,7 +142,10 @@ export component MainWindow inherits Window {
                 min-width: 200px;
                 horizontal-stretch: 0;
                 spacing: 10px;
-                SectionTitle { text: "源设备"; }
+                SectionTitle {
+                    text: root.i18n-source-device;
+                }
+
                 Rectangle {
                     background: #111827;
                     border-color: #243041;
@@ -134,26 +160,27 @@ export component MainWindow inherits Window {
                             height: 56px;
                             background: source.selected ? #1b2a36 : transparent;
 
-                            TouchArea {
-                                clicked => { root.select-source(source.id); }
+                            Rectangle {
+                                x: 12px;
+                                y: (parent.height - self.height) / 2;
+                                width: 4px;
+                                height: 20px;
+                                border-radius: 2px;
+                                background: source.selected ? #2bd97f : transparent;
                             }
-                            HorizontalLayout {
-                                padding-left: 12px;
-                                padding-right: 12px;
-                                spacing: 10px;
-                                alignment: center;
-                                Rectangle {
-                                    width: 4px;
-                                    height: 28px;
-                                    border-radius: 2px;
-                                    background: source.selected ? #2bd97f : transparent;
-                                }
-                                Text {
-                                    text: source.name;
-                                    color: source.selected ? #f0f3f7 : #cbd5e1;
-                                    font-size: 13px;
-                                    vertical-alignment: center;
-                                    overflow: elide;
+
+                            Text {
+                                x: 26px;
+                                y: (parent.height - self.height) / 2;
+                                text: source.name;
+                                color: source.selected ? #f0f3f7 : #cbd5e1;
+                                font-size: 13px;
+                                overflow: elide;
+                            }
+
+                            TouchArea {
+                                clicked => {
+                                    root.select-source(source.id);
                                 }
                             }
                         }
@@ -164,7 +191,10 @@ export component MainWindow inherits Window {
             VerticalLayout {
                 horizontal-stretch: 1;
                 spacing: 10px;
-                SectionTitle { text: "输出设备"; }
+                SectionTitle {
+                    text: root.i18n-output-devices;
+                }
+
                 Rectangle {
                     background: #111827;
                     border-color: #243041;
@@ -188,20 +218,29 @@ export component MainWindow inherits Window {
                                 CheckBox {
                                     width: 34px;
                                     checked: device.enabled;
-                                    toggled => { root.set-output-enabled(device.id, self.checked); }
+                                    toggled => {
+                                        root.set-output-enabled(device.id, self.checked);
+                                    }
                                 }
 
                                 VerticalLayout {
                                     spacing: 4px;
-                                    DeviceName { text: device.name; }
-                                    DeviceId { text: device.id; }
+                                    DeviceName {
+                                        text: device.name;
+                                    }
+
+                                    DeviceId {
+                                        text: device.id;
+                                    }
                                 }
 
                                 ComboBox {
                                     width: 160px;
                                     model: root.channel-mode-options;
                                     current-index: device.channel-mode;
-                                    selected(value) => { root.set-output-channel-mode(device.id, self.current-index); }
+                                    selected(value) => {
+                                        root.set-output-channel-mode(device.id, self.current-index);
+                                    }
                                 }
                             }
                         }
@@ -230,6 +269,7 @@ export component MainWindow inherits Window {
                     vertical-alignment: center;
                     overflow: elide;
                 }
+
                 Text {
                     text: root.update-text;
                     color: #2bd97f;
@@ -237,25 +277,31 @@ export component MainWindow inherits Window {
                     vertical-alignment: center;
                     overflow: elide;
                 }
-                Rectangle { horizontal-stretch: 1; }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+
                 Button {
                     width: 96px;
-                    text: root.is-running ? "停止" : "启动";
-                    clicked => { root.toggle-routing(); }
+                    text: root.is-running ? root.i18n-stop : root.i18n-start;
+                    clicked => {
+                        root.toggle-routing();
+                    }
                 }
             }
         }
     }
 
     if root.show-settings: Rectangle {
-        background: #99000000;
-        TouchArea {}
+        width: 100%;
+        height: 100%;
+        background: #D9000000;
+        TouchArea { }
 
         Rectangle {
-            preferred-width: 380px;
-            preferred-height: 340px;
-            min-width: 320px;
-            min-height: 280px;
+            width: min(480px, max(320px, parent.width * 45%));
+            height: min(400px, max(280px, parent.height * 55%));
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             background: #1a2233;
@@ -271,27 +317,34 @@ export component MainWindow inherits Window {
                     background: #111827;
                     HorizontalLayout {
                         padding-left: 18px;
-                        padding-right: 12px;
                         Text {
-                            text: "设置";
+                            text: root.i18n-settings-title;
                             color: #f0f3f7;
                             font-size: 16px;
                             font-weight: 700;
                             vertical-alignment: center;
                         }
-                        Rectangle { horizontal-stretch: 1; }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+
                         Rectangle {
                             width: 28px;
                             height: 28px;
                             border-radius: 6px;
                             background: close-touch.has-hover ? #ef4444 : transparent;
                             close-touch := TouchArea {
-                                clicked => { root.cancel-settings(); }
+                                clicked => {
+                                    root.cancel-settings();
+                                }
                             }
+
                             Text {
-                                text: "✕";
+                                text: "X";
                                 color: close-touch.has-hover ? #fff : #9ca3af;
                                 font-size: 14px;
+                                font-weight: 700;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
@@ -299,7 +352,10 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                Rectangle { height: 1px; background: #243041; }
+                Rectangle {
+                    height: 1px;
+                    background: #243041;
+                }
 
                 // 内容区
                 VerticalLayout {
@@ -307,53 +363,83 @@ export component MainWindow inherits Window {
                     spacing: 12px;
 
                     SettingsRow {
-                        label: "开机自启";
-                        CheckBox { checked: root.settings-state.start-with-windows; toggled => { root.settings-state.start-with-windows = self.checked; } }
+                        label: root.i18n-start-with-windows;
+                        CheckBox {
+                            checked: root.settings-state.start-with-windows;
+                            toggled => {
+                                root.settings-state.start-with-windows = self.checked;
+                            }
+                        }
                     }
 
                     SettingsRow {
-                        label: "启动时最小化";
-                        CheckBox { checked: root.settings-state.minimized; toggled => { root.settings-state.minimized = self.checked; } }
+                        label: root.i18n-start-minimized;
+                        CheckBox {
+                            checked: root.settings-state.minimized;
+                            toggled => {
+                                root.settings-state.minimized = self.checked;
+                            }
+                        }
                     }
 
                     SettingsRow {
-                        label: "启动时自动路由";
-                        CheckBox { checked: root.settings-state.auto-route; toggled => { root.settings-state.auto-route = self.checked; } }
+                        label: root.i18n-auto-route;
+                        CheckBox {
+                            checked: root.settings-state.auto-route;
+                            toggled => {
+                                root.settings-state.auto-route = self.checked;
+                            }
+                        }
                     }
 
                     HorizontalLayout {
                         height: 36px;
                         Text {
-                            text: "语言";
+                            text: root.i18n-language;
                             color: #f0f3f7;
                             font-size: 14px;
                             vertical-alignment: center;
                         }
-                        Rectangle { horizontal-stretch: 1; }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+
                         ComboBox {
                             width: 140px;
                             model: ["English", "简体中文"];
                             current-index: root.settings-state.language-index;
-                            selected(value) => { root.settings-state.language-index = value == "简体中文" ? 1 : 0; }
+                            selected(value) => {
+                                root.settings-state.language-index = value == "简体中文" ? 1 : 0;
+                            }
                         }
                     }
                 }
 
-                Rectangle { vertical-stretch: 1; }
+                Rectangle {
+                    vertical-stretch: 1;
+                }
 
                 // 底部按钮栏
-                Rectangle { height: 1px; background: #243041; }
+                Rectangle {
+                    height: 1px;
+                    background: #243041;
+                }
+
                 HorizontalLayout {
                     height: 52px;
                     padding: 12px;
                     spacing: 10px;
                     alignment: end;
                     Button {
-                        text: "取消";
-                        clicked => { root.cancel-settings(); }
+                        text: root.i18n-cancel;
+                        clicked => {
+                            root.cancel-settings();
+                        }
                     }
+
                     Button {
-                        text: "保存设置";
+                        text: root.i18n-save;
                         clicked => {
                             root.save-settings(
                                 root.settings-state.start-with-windows,
