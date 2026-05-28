@@ -2,11 +2,16 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
+use audio_core::device_watcher::DeviceWatcher;
 use audio_core::router::{ChannelMode, Router};
 use config::ConfigManager;
-use slint::{CloseRequestResponse, ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{
+    CloseRequestResponse, ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel,
+};
 
 use crate::controller::AppController;
 use crate::tray::{AppToTrayCommand, TrayToAppCommand};
@@ -45,6 +50,12 @@ pub fn run_slint_app(
     });
 
     spawn_tray_command_bridge(ui.as_weak(), tray_rx)?;
+    let device_refresh_pending = spawn_device_watcher()?;
+    let _device_refresh_timer = start_device_refresh_timer(
+        ui.as_weak(),
+        Rc::clone(&controller),
+        Arc::clone(&device_refresh_pending),
+    );
     spawn_update_check(ui.as_weak())?;
     register_callbacks(&ui, Rc::clone(&controller), tray_tx);
 
@@ -93,6 +104,44 @@ fn spawn_tray_command_bridge(
     Ok(())
 }
 
+fn spawn_device_watcher() -> anyhow::Result<Arc<AtomicBool>> {
+    let refresh_pending = Arc::new(AtomicBool::new(false));
+    let watcher_flag = Arc::clone(&refresh_pending);
+    std::thread::Builder::new()
+        .name("device-watcher".into())
+        .spawn(move || match DeviceWatcher::start() {
+            Ok((_watcher, rx)) => {
+                while rx.recv().is_ok() {
+                    watcher_flag.store(true, Ordering::Release);
+                }
+            }
+            Err(e) => log::error!("Start device watcher failed: {e}"),
+        })?;
+    Ok(refresh_pending)
+}
+
+fn start_device_refresh_timer(
+    weak_ui: slint::Weak<MainWindow>,
+    controller: Rc<RefCell<AppController>>,
+    refresh_pending: Arc<AtomicBool>,
+) -> Timer {
+    let timer = Timer::default();
+    let mut last_poll = Instant::now();
+    timer.start(TimerMode::Repeated, Duration::from_millis(700), move || {
+        let should_poll = last_poll.elapsed() >= Duration::from_secs(10);
+        if !refresh_pending.swap(false, Ordering::AcqRel) && !should_poll {
+            return;
+        }
+        last_poll = Instant::now();
+        if let Some(ui) = weak_ui.upgrade() {
+            let mut controller = controller.borrow_mut();
+            controller.refresh_devices();
+            update_main_window(&ui, &controller);
+        }
+    });
+    timer
+}
+
 fn spawn_update_check(weak_ui: slint::Weak<MainWindow>) -> anyhow::Result<()> {
     std::thread::Builder::new()
         .name("update-check".into())
@@ -120,16 +169,6 @@ fn register_callbacks(
     controller: Rc<RefCell<AppController>>,
     tray_tx: mpsc::Sender<AppToTrayCommand>,
 ) {
-    let weak_ui = ui.as_weak();
-    let refresh_controller = Rc::clone(&controller);
-    ui.on_refresh_devices(move || {
-        if let Some(ui) = weak_ui.upgrade() {
-            let mut controller = refresh_controller.borrow_mut();
-            controller.refresh_devices();
-            update_main_window(&ui, &controller);
-        }
-    });
-
     let weak_ui = ui.as_weak();
     let routing_controller = Rc::clone(&controller);
     ui.on_toggle_routing(move || {
@@ -166,11 +205,11 @@ fn register_callbacks(
 
     let weak_ui = ui.as_weak();
     let channel_controller = Rc::clone(&controller);
-    ui.on_next_channel_mode(move |device_id| {
+    ui.on_set_output_channel_mode(move |device_id, channel_index| {
         if let Some(ui) = weak_ui.upgrade() {
             let mut controller = channel_controller.borrow_mut();
-            if let Some(next_mode) = next_channel_mode(&controller, device_id.as_str()) {
-                controller.set_output_channel_mode(device_id.as_str(), next_mode);
+            if let Some(channel_mode) = channel_mode_from_index(channel_index) {
+                controller.set_output_channel_mode(device_id.as_str(), channel_mode);
                 update_main_window(&ui, &controller);
             }
         }
@@ -222,6 +261,9 @@ fn update_main_window(ui: &MainWindow, controller: &AppController) {
     ui.set_status_text(controller.status_text.as_str().into());
     ui.set_source_devices(ModelRc::new(VecModel::from(source_rows(controller))));
     ui.set_output_devices(ModelRc::new(VecModel::from(output_rows(controller))));
+    ui.set_channel_mode_options(ModelRc::new(VecModel::from(channel_mode_options(
+        controller,
+    ))));
 }
 
 fn source_rows(controller: &AppController) -> Vec<SourceDevice> {
@@ -251,24 +293,9 @@ fn output_rows(controller: &AppController) -> Vec<DeviceRow> {
                 name: SharedString::from(device.friendly_name.as_str()),
                 enabled,
                 channel_mode: channel_mode_index(channel_mode),
-                channel_label: SharedString::from(
-                    channel_mode_label(controller, channel_mode).as_str(),
-                ),
             }
         })
         .collect()
-}
-
-fn next_channel_mode(controller: &AppController, device_id: &str) -> Option<ChannelMode> {
-    let cfg = controller.config_manager.handle().read().clone();
-    let current = cfg
-        .outputs
-        .iter()
-        .find(|o| o.device_id == device_id)
-        .map(|o| ChannelMode::from_config(o.channel_mode.as_deref()))
-        .unwrap_or_default();
-    let index = CHANNEL_MODES.iter().position(|mode| *mode == current)?;
-    Some(CHANNEL_MODES[(index + 1) % CHANNEL_MODES.len()])
 }
 
 fn channel_mode_index(channel_mode: ChannelMode) -> i32 {
@@ -276,6 +303,13 @@ fn channel_mode_index(channel_mode: ChannelMode) -> i32 {
         .iter()
         .position(|mode| *mode == channel_mode)
         .unwrap_or(0) as i32
+}
+
+fn channel_mode_options(controller: &AppController) -> Vec<SharedString> {
+    CHANNEL_MODES
+        .iter()
+        .map(|mode| SharedString::from(channel_mode_label(controller, *mode).as_str()))
+        .collect()
 }
 
 fn channel_mode_label(controller: &AppController, channel_mode: ChannelMode) -> String {
@@ -289,6 +323,10 @@ fn channel_mode_label(controller: &AppController, channel_mode: ChannelMode) -> 
         ChannelMode::RightOnly => "channelModes.RightOnly",
     };
     controller.i18n.t(key).to_string()
+}
+
+fn channel_mode_from_index(index: i32) -> Option<ChannelMode> {
+    CHANNEL_MODES.get(index as usize).copied()
 }
 
 fn settings_state(controller: &AppController) -> SettingsState {

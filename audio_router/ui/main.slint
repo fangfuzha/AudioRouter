@@ -11,7 +11,6 @@ export struct DeviceRow {
     name: string,
     enabled: bool,
     channel-mode: int,
-    channel-label: string,
 }
 
 export struct SettingsState {
@@ -60,27 +59,28 @@ export component MainWindow inherits Window {
     in-out property <SettingsState> settings-state;
     in property <[SourceDevice]> source-devices;
     in property <[DeviceRow]> output-devices;
-    callback refresh-devices();
+    in property <[string]> channel-mode-options;
     callback toggle-routing();
     callback select-source(string);
     callback set-output-enabled(string, bool);
-    callback next-channel-mode(string);
+    callback set-output-channel-mode(string, int);
     callback open-settings();
     callback save-settings(bool, bool, bool, int);
     callback cancel-settings();
 
     title: "AudioRouter";
     icon: @image-url("../assets/icon.png");
-    width: 900px;
+    width: 980px;
     height: 720px;
     background: #0b0f14;
 
     VerticalLayout {
         padding: 22px;
-        spacing: 16px;
+        spacing: 14px;
 
         HorizontalLayout {
             height: 42px;
+            spacing: 12px;
             Text {
                 text: "AudioRouter";
                 color: #f0f3f7;
@@ -88,100 +88,115 @@ export component MainWindow inherits Window {
                 font-weight: 700;
                 vertical-alignment: center;
             }
-            Rectangle { width: 1px; }
             Text {
                 text: root.is-running ? "运行中" : "就绪";
                 color: root.is-running ? #2bd97f : #9ca3af;
                 font-size: 13px;
                 vertical-alignment: center;
             }
+            Rectangle { horizontal-stretch: 1; }
+            Text {
+                text: "设备：" + root.device-count;
+                color: #6b7280;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
             Button {
+                width: 82px;
                 text: "设置";
                 clicked => { root.open-settings(); }
             }
-            Button {
-                text: "刷新设备";
-                clicked => { root.refresh-devices(); }
-            }
         }
 
-        GridLayout {
+        HorizontalLayout {
             spacing: 16px;
-            Row {
-                VerticalLayout {
-                    spacing: 10px;
-                    SectionTitle { text: "源设备"; }
-                    Rectangle {
-                        height: 150px;
-                        background: #111827;
-                        border-color: #243041;
-                        border-width: 1px;
-                        border-radius: 8px;
-                        ListView {
-                            viewport-width: parent.width;
-                            viewport-height: parent.height;
-                            for source in root.source-devices: Rectangle {
-                                height: 42px;
-                                background: source.selected ? #1b2a36 : transparent;
-                                border-radius: 6px;
-                                TouchArea {
-                                    clicked => { root.select-source(source.id); }
+
+            VerticalLayout {
+                width: 300px;
+                spacing: 10px;
+                SectionTitle { text: "源设备"; }
+                Rectangle {
+                    background: #111827;
+                    border-color: #243041;
+                    border-width: 1px;
+                    border-radius: 8px;
+                    clip: true;
+
+                    ListView {
+                        viewport-width: parent.width;
+                        viewport-height: parent.height;
+                        for source in root.source-devices: Rectangle {
+                            height: 56px;
+                            background: source.selected ? #1b2a36 : transparent;
+
+                            TouchArea {
+                                clicked => { root.select-source(source.id); }
+                            }
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                spacing: 10px;
+                                alignment: center;
+                                Rectangle {
+                                    width: 4px;
+                                    height: 28px;
+                                    border-radius: 2px;
+                                    background: source.selected ? #2bd97f : transparent;
                                 }
-                                HorizontalLayout {
-                                    padding-left: 12px;
-                                    padding-right: 12px;
-                                    Text {
-                                        text: source.name;
-                                        color: source.selected ? #2bd97f : #f0f3f7;
-                                        font-size: 13px;
-                                        vertical-alignment: center;
-                                        overflow: elide;
-                                    }
+                                Text {
+                                    text: source.name;
+                                    color: source.selected ? #f0f3f7 : #cbd5e1;
+                                    font-size: 13px;
+                                    vertical-alignment: center;
+                                    overflow: elide;
                                 }
                             }
                         }
                     }
                 }
             }
-        }
 
-        VerticalLayout {
-            spacing: 10px;
-            SectionTitle { text: "输出设备"; }
-            Rectangle {
-                background: #111827;
-                border-color: #243041;
-                border-width: 1px;
-                border-radius: 8px;
+            VerticalLayout {
+                spacing: 10px;
+                SectionTitle { text: "输出设备"; }
+                Rectangle {
+                    background: #111827;
+                    border-color: #243041;
+                    border-width: 1px;
+                    border-radius: 8px;
+                    clip: true;
 
-                ListView {
-                    viewport-width: parent.width;
-                    viewport-height: parent.height;
-                    for device in root.output-devices: Rectangle {
-                        height: 66px;
-                        background: device.enabled ? #111827 : #0f141d;
-                        border-radius: 6px;
+                    ListView {
+                        viewport-width: parent.width;
+                        viewport-height: parent.height;
+                        for device in root.output-devices: Rectangle {
+                            height: 74px;
+                            background: device.enabled ? #111827 : #0f141d;
 
-                        HorizontalLayout {
-                            padding-left: 14px;
-                            padding-right: 14px;
-                            spacing: 12px;
+                            HorizontalLayout {
+                                padding-left: 14px;
+                                padding-right: 14px;
+                                spacing: 12px;
+                                alignment: center;
 
-                            CheckBox {
-                                checked: device.enabled;
-                                toggled => { root.set-output-enabled(device.id, self.checked); }
-                            }
+                                CheckBox {
+                                    width: 34px;
+                                    checked: device.enabled;
+                                    toggled => { root.set-output-enabled(device.id, self.checked); }
+                                }
 
-                            VerticalLayout {
-                                spacing: 3px;
-                                DeviceName { text: device.name; }
-                                DeviceId { text: device.id; }
-                            }
+                                VerticalLayout {
+                                    spacing: 4px;
+                                    DeviceName { text: device.name; }
+                                    DeviceId { text: device.id; }
+                                }
 
-                            Button {
-                                width: 128px;
-                                text: device.channel-label;
-                                clicked => { root.next-channel-mode(device.id); }
+                                ComboBox {
+                                    width: 160px;
+                                    model: root.channel-mode-options;
+                                    current-index: device.channel-mode;
+                                    selected(value) => { root.set-output-channel-mode(device.id, self.current-index); }
+                                }
                             }
                         }
                     }
@@ -200,6 +215,7 @@ export component MainWindow inherits Window {
                 padding-left: 14px;
                 padding-right: 14px;
                 spacing: 12px;
+                alignment: center;
                 Text {
                     text: root.status-text;
                     color: #9ca3af;
@@ -214,13 +230,9 @@ export component MainWindow inherits Window {
                     vertical-alignment: center;
                     overflow: elide;
                 }
-                Text {
-                    text: "设备：" + root.device-count;
-                    color: #6b7280;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                }
+                Rectangle { horizontal-stretch: 1; }
                 Button {
+                    width: 96px;
                     text: root.is-running ? "停止" : "启动";
                     clicked => { root.toggle-routing(); }
                 }
@@ -309,5 +321,3 @@ export component MainWindow inherits Window {
         }
     }
 }
-
-

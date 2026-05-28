@@ -4,7 +4,6 @@ pub const EN_MAP: &[(&str, &str)] = &[
     ("AppTitle", "AudioRouter"),
     ("SourceDevice", "Source Device"),
     ("OutputDevices", "Output Devices"),
-    ("RefreshDevices", "Refresh Devices"),
     ("Settings", "Settings"),
     ("Start", "Start"),
     ("Stop", "Stop"),

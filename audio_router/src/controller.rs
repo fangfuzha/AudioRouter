@@ -59,7 +59,20 @@ impl AppController {
 
     pub fn refresh_devices(&mut self) {
         match get_all_output_devices() {
-            Ok(devices) => self.devices = devices,
+            Ok(devices) => {
+                if devices == self.devices {
+                    return;
+                }
+
+                self.devices = devices;
+                if self.devices.is_empty() {
+                    self.status_text = self.i18n.t("NoDevices").to_string();
+                } else if !self.is_running {
+                    self.status_text = self.i18n.t("StatusReady").to_string();
+                }
+                self.prune_invalid_selection();
+                self.apply_running_config();
+            }
             Err(e) => {
                 log::error!("Failed to enumerate devices: {e}");
                 self.status_text = self.i18n.t("ErrorLoadingDevices").to_string();
@@ -70,6 +83,7 @@ impl AppController {
     pub fn select_source_device(&mut self, device_id: String) {
         self.selected_source = Some(device_id);
         self.save_routing_config();
+        self.apply_running_config();
     }
 
     pub fn set_output_enabled(&mut self, device_id: &str, enabled: bool) {
@@ -86,7 +100,9 @@ impl AppController {
             }
         }) {
             log::error!("Save output enabled state failed: {e}");
+            return;
         }
+        self.apply_running_config();
     }
 
     pub fn set_output_channel_mode(&mut self, device_id: &str, channel_mode: ChannelMode) {
@@ -103,54 +119,29 @@ impl AppController {
             }
         }) {
             log::error!("Save output channel mode failed: {e}");
+            return;
         }
+        self.apply_running_config();
     }
 
     pub fn start_routing(&mut self) {
-        let source_id = match &self.selected_source {
-            Some(id) if !id.is_empty() => id.clone(),
-            _ => {
-                self.status_text = self.i18n.t("SelectDevice").to_string();
-                return;
-            }
+        let router_cfg = match self.build_router_config() {
+            Some(cfg) => cfg,
+            None => return,
         };
-
-        let cfg = self.config_manager.handle().read().clone();
-        let targets: Vec<RouterTarget> = self
-            .devices
-            .iter()
-            .filter_map(|d| {
-                if d.id == source_id {
-                    return None;
-                }
-                cfg.outputs
-                    .iter()
-                    .find(|o| o.device_id == d.id && o.enabled)
-                    .map(|o| RouterTarget {
-                        device_id: d.id.clone(),
-                        channel_mode: ChannelMode::from_config(o.channel_mode.as_deref()),
-                    })
-            })
-            .collect();
-
-        if targets.is_empty() {
-            self.status_text = self.i18n.t("SelectDevice").to_string();
-            return;
-        }
-
-        let router_cfg = RouterConfig {
-            source_device_id: Some(source_id),
-            targets,
-        };
+        let running_count = router_cfg.targets.len();
 
         self.status_text = self.i18n.t("Starting").to_string();
         match self.router.start(router_cfg) {
             Ok(()) => {
                 self.is_running = true;
-                let running_count = cfg.outputs.iter().filter(|o| o.enabled).count();
-                self.status_text = running_count.to_string();
+                self.status_text = self
+                    .i18n
+                    .t("RunningOn")
+                    .replace("{count}", &running_count.to_string());
             }
             Err(e) => {
+                self.is_running = false;
                 self.status_text = format!("Error: {e}");
                 log::error!("Start routing failed: {e}");
             }
@@ -165,6 +156,7 @@ impl AppController {
                 self.status_text = self.i18n.t("StatusReady").to_string();
             }
             Err(e) => {
+                self.is_running = self.router.is_running();
                 self.status_text = format!("Error: {e}");
                 log::error!("Stop routing failed: {e}");
             }
@@ -233,6 +225,72 @@ impl AppController {
             .collect()
     }
 
+    fn build_router_config(&mut self) -> Option<RouterConfig> {
+        let source_id = match &self.selected_source {
+            Some(id) if !id.is_empty() => id.clone(),
+            _ => {
+                self.status_text = self.i18n.t("SelectDevice").to_string();
+                return None;
+            }
+        };
+
+        let cfg = self.config_manager.handle().read().clone();
+        let targets: Vec<RouterTarget> = self
+            .devices
+            .iter()
+            .filter_map(|d| {
+                if d.id == source_id {
+                    return None;
+                }
+                cfg.outputs
+                    .iter()
+                    .find(|o| o.device_id == d.id && o.enabled)
+                    .map(|o| RouterTarget {
+                        device_id: d.id.clone(),
+                        channel_mode: ChannelMode::from_config(o.channel_mode.as_deref()),
+                    })
+            })
+            .collect();
+
+        if targets.is_empty() {
+            self.status_text = self.i18n.t("SelectDevice").to_string();
+            return None;
+        }
+
+        Some(RouterConfig {
+            source_device_id: Some(source_id),
+            targets,
+        })
+    }
+
+    fn apply_running_config(&mut self) {
+        if !self.is_running {
+            return;
+        }
+
+        if let Err(e) = self.router.stop() {
+            self.is_running = self.router.is_running();
+            self.status_text = format!("Error: {e}");
+            log::error!("Stop routing before applying config failed: {e}");
+            return;
+        }
+        self.is_running = false;
+
+        if self.build_router_config().is_some() {
+            self.start_routing();
+        }
+    }
+
+    fn prune_invalid_selection(&mut self) {
+        let Some(selected) = self.selected_source.as_deref() else {
+            return;
+        };
+        if !self.devices.iter().any(|device| device.id == selected) {
+            self.selected_source = self.devices.first().map(|device| device.id.clone());
+            self.save_routing_config();
+        }
+    }
+
     fn start_auto_route_if_enabled(&mut self) {
         let cfg = self.config_manager.handle().read().clone();
         if !cfg.general.auto_route || cfg.source_device_id.is_empty() {
@@ -253,12 +311,17 @@ impl AppController {
             return;
         }
 
+        let running_count = enabled_targets.len();
         let router_cfg = RouterConfig {
             source_device_id: Some(cfg.source_device_id.clone()),
             targets: enabled_targets,
         };
         if self.router.start(router_cfg).is_ok() {
             self.is_running = true;
+            self.status_text = self
+                .i18n
+                .t("RunningOn")
+                .replace("{count}", &running_count.to_string());
         }
     }
 }

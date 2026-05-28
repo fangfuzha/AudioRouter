@@ -4,7 +4,6 @@ pub const ZH_MAP: &[(&str, &str)] = &[
     ("AppTitle", "AudioRouter"),
     ("SourceDevice", "源设备"),
     ("OutputDevices", "输出设备"),
-    ("RefreshDevices", "刷新设备"),
     ("Settings", "设置"),
     ("Start", "启动"),
     ("Stop", "停止"),
