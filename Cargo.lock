@@ -529,6 +529,7 @@ dependencies = [
  "audio_core",
  "config",
  "env_logger",
+ "icu_segmenter",
  "image",
  "log",
  "serde",
@@ -2706,6 +2707,7 @@ version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a807a7488f3f758629ae86d99d9d30dce24da2fb2945d74c80a4f4a62c71db73"
 dependencies = [
+ "core_maths",
  "icu_collections",
  "icu_locale",
  "icu_provider",
