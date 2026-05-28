@@ -32,9 +32,6 @@ env_logger = "0.11"
 image = { version = "0.25", default-features = false, features = ["png"] }
 slint = "1.16.1"
 
-# 启用 LSTM 分词模型，支持日语等 CJK 语言的正确换行
-icu_segmenter = { version = "2.1.2", features = ["auto"] }
-
 [build-dependencies]
 slint-build = "1.16.1"
 winresource = { version = "0.1.31", default-features = false }
