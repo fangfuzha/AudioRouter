@@ -19,6 +19,7 @@ fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .filter_module("icu_segmenter", log::LevelFilter::Off)
         .format_timestamp_micros()
+        .format_module_path(true)
         .init();
 
     let cmd_minimized = std::env::args().any(|a| a == "--minimized");
