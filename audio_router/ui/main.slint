@@ -70,8 +70,10 @@ export component MainWindow inherits Window {
 
     title: "AudioRouter";
     icon: @image-url("../assets/icon.png");
-    width: 980px;
-    height: 720px;
+    preferred-width: 980px;
+    preferred-height: 720px;
+    min-width: 640px;
+    min-height: 480px;
     background: #0b0f14;
 
     VerticalLayout {
@@ -80,6 +82,7 @@ export component MainWindow inherits Window {
 
         HorizontalLayout {
             height: 42px;
+            vertical-stretch: 0;
             spacing: 12px;
             Text {
                 text: "AudioRouter";
@@ -112,7 +115,9 @@ export component MainWindow inherits Window {
             spacing: 16px;
 
             VerticalLayout {
-                width: 300px;
+                preferred-width: 260px;
+                min-width: 200px;
+                horizontal-stretch: 0;
                 spacing: 10px;
                 SectionTitle { text: "源设备"; }
                 Rectangle {
@@ -157,6 +162,7 @@ export component MainWindow inherits Window {
             }
 
             VerticalLayout {
+                horizontal-stretch: 1;
                 spacing: 10px;
                 SectionTitle { text: "输出设备"; }
                 Rectangle {
@@ -206,6 +212,7 @@ export component MainWindow inherits Window {
 
         Rectangle {
             height: 54px;
+            vertical-stretch: 0;
             background: #0f1722;
             border-color: #243041;
             border-width: 1px;
@@ -245,8 +252,10 @@ export component MainWindow inherits Window {
         TouchArea {}
 
         Rectangle {
-            width: 360px;
-            height: 318px;
+            preferred-width: 360px;
+            preferred-height: 318px;
+            min-width: 300px;
+            min-height: 260px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             background: #111827;
