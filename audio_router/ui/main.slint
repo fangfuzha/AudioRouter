@@ -1,3 +1,5 @@
+export { TrayPopupWindow } from "tray_popup.slint";
+
 import { Button, CheckBox, ComboBox, ListView } from "std-widgets.slint";
 
 export struct SourceDevice {
@@ -313,7 +315,7 @@ export component MainWindow inherits Window {
             VerticalLayout {
                 // 标题栏
                 Rectangle {
-                    height: 48px;
+                    height: 34px;
                     background: #111827;
                     HorizontalLayout {
                         padding-left: 18px;
@@ -330,8 +332,8 @@ export component MainWindow inherits Window {
                         }
 
                         Rectangle {
-                            width: 28px;
-                            height: 28px;
+                            width: 42px;
+                            height: 34px;
                             border-radius: 6px;
                             background: close-touch.has-hover ? #ef4444 : transparent;
                             close-touch := TouchArea {
@@ -343,7 +345,7 @@ export component MainWindow inherits Window {
                             Text {
                                 text: "X";
                                 color: close-touch.has-hover ? #fff : #9ca3af;
-                                font-size: 14px;
+                                font-size: 16px;
                                 font-weight: 700;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;

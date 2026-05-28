@@ -30,6 +30,8 @@ pub const EN_MAP: &[(&str, &str)] = &[
     ("channelModes.LeftOnly", "Left Only"),
     ("channelModes.RightOnly", "Right Only"),
     ("UpdateAvailable", "New version available!"),
+    ("UpdateAvailableVersion", "New version {v} available!"),
+    ("UpdateCheckFailed", "Update check failed: {e}"),
     ("CheckingUpdate", "Checking for updates..."),
     ("Starting", "Starting..."),
     ("Stopping", "Stopping..."),

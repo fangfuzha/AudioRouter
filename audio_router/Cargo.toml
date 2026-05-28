@@ -1,6 +1,6 @@
 [package]
 name = "audio_router"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -17,7 +17,9 @@ tray-icon = "0.19"
 windows = { version = "0.58", features = [
   "Win32_System_Registry",
   "Win32_Foundation",
+  "Win32_Graphics_Gdi",
   "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
 ] }
 
 # HTTP 请求（版本更新检查）
@@ -30,7 +32,7 @@ env_logger = "0.11"
 
 # 图像加载（托盘图标、窗口图标）
 image = { version = "0.25", default-features = false, features = ["png"] }
-slint = "1.16.1"
+slint = { version = "1.16.1", features = ["unstable-winit-030"] }
 
 [build-dependencies]
 slint-build = "1.16.1"

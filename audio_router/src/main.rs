@@ -32,10 +32,9 @@ fn main() -> anyhow::Result<()> {
     let (tray_cmd_tx, tray_cmd_rx) = mpsc::channel::<AppToTrayCommand>();
     let (app_cmd_tx, app_cmd_rx) = mpsc::channel::<TrayToAppCommand>();
 
-    let tray_locale = cfg.general.language.clone();
     std::thread::Builder::new()
         .name("tray-icon".into())
-        .spawn(move || tray::run_tray(tray_cmd_rx, app_cmd_tx, tray_locale))?;
+        .spawn(move || tray::run_tray(tray_cmd_rx, app_cmd_tx))?;
 
     let router = Router::new();
     slint_app::run_slint_app(

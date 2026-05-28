@@ -1,12 +1,34 @@
 //! 系统托盘模块
 
 use std::sync::mpsc;
-use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
+use std::time::Duration;
 use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::WindowsAndMessaging::{
+    DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
+};
+
+#[derive(Debug, Clone, Copy)]
+pub struct TrayAnchorRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TrayClickPoint {
+    pub x: i32,
+    pub y: i32,
+}
 
 #[derive(Debug, Clone)]
 pub enum TrayToAppCommand {
     ShowWindow,
+    ShowTrayPopup {
+        anchor_rect: TrayAnchorRect,
+        click_pos: TrayClickPoint,
+    },
     Quit,
 }
 
@@ -17,11 +39,7 @@ pub enum AppToTrayCommand {
 }
 
 /// 创建并运行系统托盘（在独立线程中运行）
-pub fn run_tray(
-    rx: mpsc::Receiver<AppToTrayCommand>,
-    tx: mpsc::Sender<TrayToAppCommand>,
-    locale: String,
-) {
+pub fn run_tray(rx: mpsc::Receiver<AppToTrayCommand>, tx: mpsc::Sender<TrayToAppCommand>) {
     let icon = match load_tray_icon() {
         Some(icon) => icon,
         None => {
@@ -30,49 +48,46 @@ pub fn run_tray(
         }
     };
 
-    let tray_menu = Menu::new();
-    let show_item = MenuItem::new(tray_text(&locale, "Show"), true, None);
-    let quit_item = MenuItem::new(tray_text(&locale, "Exit"), true, None);
-
-    // 提取 ID 为独立的所有权值（避免 MenuItem 的非 Send 问题）
-    let sid: MenuId = show_item.id().clone();
-    let qid: MenuId = quit_item.id().clone();
-
-    let _ = tray_menu.append_items(&[&show_item, &quit_item]);
-
-    // 构建托盘图标，然后丢弃 MenuItem（menu 已经内部持有）
-    drop(show_item);
-    drop(quit_item);
-
     let tray_icon = TrayIconBuilder::new()
-        .with_menu(Box::new(tray_menu))
         .with_tooltip("AudioRouter")
         .with_icon(icon)
         .build();
 
     match tray_icon {
         Ok(_tray_icon) => {
-            // 菜单事件
-            let menu_tx = tx.clone();
-            MenuEvent::set_event_handler(Some(move |event: tray_icon::menu::MenuEvent| {
-                if *event.id() == sid {
-                    let _ = menu_tx.send(TrayToAppCommand::ShowWindow);
-                } else if *event.id() == qid {
-                    let _ = menu_tx.send(TrayToAppCommand::Quit);
-                }
-            }));
-
-            // 左键点击事件
+            // 点击事件
             let click_tx = tx.clone();
-            TrayIconEvent::set_event_handler(Some(move |event| {
-                if let TrayIconEvent::Click {
+            TrayIconEvent::set_event_handler(Some(move |event| match event {
+                TrayIconEvent::Click {
                     button: tray_icon::MouseButton::Left,
                     button_state: tray_icon::MouseButtonState::Up,
                     ..
-                } = event
-                {
+                } => {
+                    log::info!("Tray icon left click released: show window");
                     let _ = click_tx.send(TrayToAppCommand::ShowWindow);
                 }
+                TrayIconEvent::Click {
+                    button: tray_icon::MouseButton::Right,
+                    button_state: tray_icon::MouseButtonState::Up,
+                    position,
+                    rect,
+                    ..
+                } => {
+                    log::info!("Tray icon right click released: show tray popup");
+                    let _ = click_tx.send(TrayToAppCommand::ShowTrayPopup {
+                        anchor_rect: TrayAnchorRect {
+                            x: rect.position.x as i32,
+                            y: rect.position.y as i32,
+                            width: rect.size.width as i32,
+                            height: rect.size.height as i32,
+                        },
+                        click_pos: TrayClickPoint {
+                            x: position.x as i32,
+                            y: position.y as i32,
+                        },
+                    });
+                }
+                _ => {}
             }));
 
             keep_tray_alive(_tray_icon, rx);
@@ -82,25 +97,33 @@ pub fn run_tray(
 }
 
 fn keep_tray_alive(_tray_icon: TrayIcon, rx: mpsc::Receiver<AppToTrayCommand>) {
-    while let Ok(cmd) = rx.recv() {
-        match cmd {
-            AppToTrayCommand::Quit => break,
-            AppToTrayCommand::UpdateLanguage(_lang) => {
+    loop {
+        pump_tray_event_loop();
+
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(AppToTrayCommand::Quit) => break,
+            Ok(AppToTrayCommand::UpdateLanguage(_lang)) => {
                 // tray-icon 菜单文本无法稳定原地更新，下一次启动会应用语言。
             }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 }
 
-fn tray_text(locale: &str, key: &str) -> String {
-    match (locale, key) {
-        ("zh", "Show") => "显示".to_string(),
-        ("zh", "Exit") => "退出".to_string(),
-        (_, "Show") => "Show".to_string(),
-        (_, "Exit") => "Quit".to_string(),
-        _ => key.to_string(),
+#[cfg(target_os = "windows")]
+fn pump_tray_event_loop() {
+    unsafe {
+        let mut msg = MSG::default();
+        while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).into() {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
     }
 }
+
+#[cfg(not(target_os = "windows"))]
+fn pump_tray_event_loop() {}
 
 fn load_tray_icon() -> Option<tray_icon::Icon> {
     let icon_path = std::env::current_exe()

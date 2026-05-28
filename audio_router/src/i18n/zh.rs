@@ -30,6 +30,8 @@ pub const ZH_MAP: &[(&str, &str)] = &[
     ("channelModes.LeftOnly", "仅左侧"),
     ("channelModes.RightOnly", "仅右侧"),
     ("UpdateAvailable", "发现新版本！"),
+    ("UpdateAvailableVersion", "发现新版本 {v}！"),
+    ("UpdateCheckFailed", "更新检查失败：{e}"),
     ("CheckingUpdate", "正在检查更新..."),
     ("Starting", "启动中..."),
     ("Stopping", "停止中..."),

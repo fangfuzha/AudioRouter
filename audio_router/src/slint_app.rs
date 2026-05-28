@@ -9,12 +9,13 @@ use std::time::{Duration, Instant};
 use audio_core::device_watcher::DeviceWatcher;
 use audio_core::router::{ChannelMode, Router};
 use config::ConfigManager;
+use slint::winit_030::WinitWindowAccessor;
 use slint::{
     CloseRequestResponse, ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel,
 };
 
 use crate::controller::AppController;
-use crate::tray::{AppToTrayCommand, TrayToAppCommand};
+use crate::tray::{AppToTrayCommand, TrayAnchorRect, TrayToAppCommand};
 use crate::update::UpdateStatus;
 
 slint::include_modules!();
@@ -29,6 +30,12 @@ const CHANNEL_MODES: &[ChannelMode] = &[
     ChannelMode::RightOnly,
 ];
 
+#[derive(Clone)]
+struct TrayPopupHandles {
+    main_window: slint::Weak<MainWindow>,
+    popup_window: slint::Weak<TrayPopupWindow>,
+}
+
 pub fn run_slint_app(
     config_manager: ConfigManager,
     router: Router,
@@ -37,7 +44,27 @@ pub fn run_slint_app(
     initial_window_visible: bool,
 ) -> anyhow::Result<()> {
     let ui = MainWindow::new()?;
+    let tray_popup = TrayPopupWindow::new()?;
     let controller = Rc::new(RefCell::new(AppController::new(config_manager, router)));
+
+    // 为托盘弹窗设置 Win32 圆角窗口区域（176×168, 圆角半径 6px）
+    {
+        use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
+        tray_popup.window().with_winit_window(|w| {
+            if let Ok(handle) = w.window_handle() {
+                if let RawWindowHandle::Win32(win32) = handle.as_raw() {
+                    let hwnd = HWND(win32.hwnd.get() as *mut _);
+                    // CreateRoundRectRgn: 左上右下 + 椭圆宽高（直径 = 2 × 半径）
+                    let region = unsafe { CreateRoundRectRgn(0, 0, 160, 168, 12, 12) };
+                    unsafe {
+                        let _ = SetWindowRgn(hwnd, region, true);
+                    }
+                }
+            }
+        });
+    }
 
     ui.window().on_close_requested({
         let weak_ui = ui.as_weak();
@@ -45,18 +72,103 @@ pub fn run_slint_app(
             if let Some(ui) = weak_ui.upgrade() {
                 let _ = ui.hide();
             }
-            CloseRequestResponse::KeepWindowShown
+            CloseRequestResponse::HideWindow
         }
     });
 
-    spawn_tray_command_bridge(ui.as_weak(), tray_rx)?;
+    spawn_tray_command_bridge(
+        TrayPopupHandles {
+            main_window: ui.as_weak(),
+            popup_window: tray_popup.as_weak(),
+        },
+        tray_rx,
+    )?;
     let device_refresh_pending = spawn_device_watcher()?;
     let _device_refresh_timer = start_device_refresh_timer(
         ui.as_weak(),
         Rc::clone(&controller),
         Arc::clone(&device_refresh_pending),
     );
-    spawn_update_check(ui.as_weak())?;
+    spawn_update_check(ui.as_weak(), controller.borrow().i18n.locale().to_string())?;
+
+    // 托盘弹窗回调
+    {
+        let weak_popup = tray_popup.as_weak();
+        let weak_ui = ui.as_weak();
+        tray_popup.on_show_main_window(move || {
+            if let Some(popup) = weak_popup.upgrade() {
+                let _ = popup.hide();
+            }
+            if let Some(ui) = weak_ui.upgrade() {
+                let _ = show_and_focus_window(&ui);
+            }
+        });
+    }
+    {
+        let weak_popup = tray_popup.as_weak();
+        let popup_controller = Rc::clone(&controller);
+        let weak_ui = ui.as_weak();
+        tray_popup.on_toggle_routing(move || {
+            if let Some(popup) = weak_popup.upgrade() {
+                let mut controller = popup_controller.borrow_mut();
+                if controller.is_running {
+                    controller.stop_routing();
+                } else {
+                    controller.start_routing();
+                }
+                // 同步状态到主窗口和弹窗
+                if let Some(ui) = weak_ui.upgrade() {
+                    update_main_window(&ui, &controller);
+                }
+                popup.set_routing_running(controller.is_running);
+                let _ = popup.hide();
+            }
+        });
+    }
+    {
+        let weak_popup = tray_popup.as_weak();
+        tray_popup.on_quit_app(move || {
+            if let Some(popup) = weak_popup.upgrade() {
+                let _ = popup.hide();
+            }
+            let _ = slint::quit_event_loop();
+        });
+    }
+    // Esc 关闭弹窗
+    {
+        let weak_popup = tray_popup.as_weak();
+        tray_popup.on_request_close(move || {
+            if let Some(popup) = weak_popup.upgrade() {
+                let _ = popup.hide();
+            }
+        });
+    }
+    // 失焦关闭：用 Timer 轮询弹窗焦点状态
+    let _popup_focus_timer = {
+        let popup_timer = Timer::default();
+        let weak_popup = tray_popup.as_weak();
+        let focus_state = Rc::new(RefCell::new(false));
+        popup_timer.start(TimerMode::Repeated, Duration::from_millis(100), move || {
+            if let Some(popup) = weak_popup.upgrade() {
+                if popup.window().is_visible() {
+                    let has_focus = popup
+                        .window()
+                        .with_winit_window(|w| w.has_focus())
+                        .unwrap_or(false);
+                    let was_focused = *focus_state.borrow();
+                    // 从有焦点变为无焦点 → 关闭弹窗
+                    if was_focused && !has_focus {
+                        let _ = popup.hide();
+                    }
+                    *focus_state.borrow_mut() = has_focus;
+                } else {
+                    *focus_state.borrow_mut() = false;
+                }
+            }
+        });
+        popup_timer
+    };
+
     register_callbacks(&ui, Rc::clone(&controller), tray_tx);
 
     {
@@ -66,15 +178,37 @@ pub fn run_slint_app(
     }
 
     if initial_window_visible {
-        ui.show()?;
+        show_and_focus_window(&ui)?;
     }
 
-    slint::run_event_loop()?;
+    slint::run_event_loop_until_quit()?;
+    Ok(())
+}
+
+/// 统一处理窗口拉起逻辑，供启动阶段与托盘事件复用。
+fn show_and_focus_window(ui: &MainWindow) -> Result<(), slint::PlatformError> {
+    log::info!("Show and focus window requested");
+    ui.show()?;
+
+    let window = ui.window();
+    let was_minimized = window.is_minimized();
+    log::info!("Window minimized before restore: {}", was_minimized);
+    if was_minimized {
+        window.set_minimized(false);
+    }
+
+    let used_winit = window.with_winit_window(|winit_window| {
+        log::info!("Using winit window activation path");
+        winit_window.focus_window();
+        winit_window.request_user_attention(None);
+    });
+    log::info!("Winit activation available: {}", used_winit.is_some());
+
     Ok(())
 }
 
 fn spawn_tray_command_bridge(
-    weak_ui: slint::Weak<MainWindow>,
+    handles: TrayPopupHandles,
     tray_rx: mpsc::Receiver<TrayToAppCommand>,
 ) -> anyhow::Result<()> {
     std::thread::Builder::new()
@@ -82,17 +216,83 @@ fn spawn_tray_command_bridge(
         .spawn(move || {
             while let Ok(cmd) = tray_rx.recv() {
                 let should_quit = matches!(cmd, TrayToAppCommand::Quit);
-                let weak_ui = weak_ui.clone();
+                let handles = handles.clone();
                 let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = weak_ui.upgrade() {
-                        match cmd {
-                            TrayToAppCommand::ShowWindow => {
-                                let _ = ui.show();
+                    match cmd {
+                        TrayToAppCommand::ShowWindow => {
+                            if let Some(ui) = handles.main_window.upgrade() {
+                                let _ = show_and_focus_window(&ui);
                             }
-                            TrayToAppCommand::Quit => {
+                        }
+                        TrayToAppCommand::ShowTrayPopup {
+                            anchor_rect,
+                            click_pos: _,
+                        } => {
+                            if let Some(popup) = handles.popup_window.upgrade() {
+                                // 同步路由运行状态到弹窗
+                                let is_running = handles
+                                    .main_window
+                                    .upgrade()
+                                    .map(|ui| ui.get_is_running())
+                                    .unwrap_or(false);
+                                popup.set_routing_running(is_running);
+
+                                // 获取屏幕尺寸（通过 winit 查询当前显示器）
+                                let screen_size = popup
+                                    .window()
+                                    .with_winit_window(|winit_window| {
+                                        winit_window
+                                            .current_monitor()
+                                            .map(|m| {
+                                                let s = m.size();
+                                                (s.width as i32, s.height as i32)
+                                            })
+                                            .unwrap_or((
+                                                anchor_rect.x + anchor_rect.width + 220,
+                                                anchor_rect.y + anchor_rect.height + 200,
+                                            ))
+                                    })
+                                    .unwrap_or((
+                                        anchor_rect.x + anchor_rect.width + 220,
+                                        anchor_rect.y + anchor_rect.height + 200,
+                                    ));
+
+                                // 弹窗物理像素尺寸（与 tray_popup.slint 中 max-width/max-height 一致）
+                                let popup_size = (160, 168);
+                                let gap = 8;
+                                let (px, py) = compute_tray_popup_position(
+                                    anchor_rect,
+                                    popup_size,
+                                    screen_size,
+                                    gap,
+                                );
+
+                                if let Err(e) = popup.show() {
+                                    log::error!("Show tray popup failed: {e}");
+                                } else {
+                                    popup
+                                        .window()
+                                        .set_position(slint::PhysicalPosition::new(px, py));
+                                    // 强制焦点以启用失焦关闭
+                                    popup.window().with_winit_window(|w| {
+                                        w.focus_window();
+                                    });
+                                    log::info!("Tray popup shown at ({px}, {py})");
+                                }
+                            } else {
+                                log::warn!(
+                                    "Show tray popup requested after popup window was released"
+                                );
+                            }
+                        }
+                        TrayToAppCommand::Quit => {
+                            if let Some(popup) = handles.popup_window.upgrade() {
+                                let _ = popup.hide();
+                            }
+                            if let Some(ui) = handles.main_window.upgrade() {
                                 let _ = ui.hide();
-                                let _ = slint::quit_event_loop();
                             }
+                            let _ = slint::quit_event_loop();
                         }
                     }
                 });
@@ -142,28 +342,32 @@ fn start_device_refresh_timer(
     timer
 }
 
-fn spawn_update_check(weak_ui: slint::Weak<MainWindow>) -> anyhow::Result<()> {
+fn spawn_update_check(weak_ui: slint::Weak<MainWindow>, locale: String) -> anyhow::Result<()> {
     std::thread::Builder::new()
         .name("update-check".into())
         .spawn(move || {
             let status = crate::update::check_for_update();
+            let i18n = crate::i18n::I18n::new(&locale);
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak_ui.upgrade() {
-                    ui.set_update_text(update_status_text(&status).into());
+                    ui.set_update_text(update_status_text(&status, &i18n).into());
                 }
             });
         })?;
     Ok(())
 }
 
-fn update_status_text(status: &UpdateStatus) -> String {
+fn update_status_text(status: &UpdateStatus, i18n: &crate::i18n::I18n) -> String {
     match status {
-        UpdateStatus::Available { latest_version, .. } => format!("发现新版本 {latest_version}"),
-        UpdateStatus::Checking => "正在检查更新...".to_string(),
-        UpdateStatus::Error(e) => format!("更新检查失败：{e}"),
+        UpdateStatus::Available { latest_version, .. } => i18n
+            .t("UpdateAvailableVersion")
+            .replace("{v}", latest_version),
+        UpdateStatus::Checking => i18n.t("CheckingUpdate").to_string(),
+        UpdateStatus::Error(e) => i18n.t("UpdateCheckFailed").replace("{e}", &e.to_string()),
         UpdateStatus::Idle | UpdateStatus::UpToDate => String::new(),
     }
 }
+
 fn register_callbacks(
     ui: &MainWindow,
     controller: Rc<RefCell<AppController>>,
@@ -255,6 +459,7 @@ fn register_callbacks(
 }
 
 fn update_main_window(ui: &MainWindow, controller: &AppController) {
+    let i18n = &controller.i18n;
     ui.set_settings_state(settings_state(controller));
     ui.set_device_count(controller.devices.len() as i32);
     ui.set_is_running(controller.is_running);
@@ -264,6 +469,27 @@ fn update_main_window(ui: &MainWindow, controller: &AppController) {
     ui.set_channel_mode_options(ModelRc::new(VecModel::from(channel_mode_options(
         controller,
     ))));
+
+    // i18n 翻译文本
+    ui.set_i18n_status_running(i18n.t("Running").into());
+    ui.set_i18n_status_ready(i18n.t("StatusReady").into());
+    ui.set_i18n_device_count_text(
+        i18n.t("FoundDevices")
+            .replace("{count}", &controller.devices.len().to_string())
+            .into(),
+    );
+    ui.set_i18n_settings(i18n.t("Settings").into());
+    ui.set_i18n_settings_title(i18n.t("SettingsTitle").into());
+    ui.set_i18n_source_device(i18n.t("SourceDevice").into());
+    ui.set_i18n_output_devices(i18n.t("OutputDevices").into());
+    ui.set_i18n_start(i18n.t("Start").into());
+    ui.set_i18n_stop(i18n.t("Stop").into());
+    ui.set_i18n_start_with_windows(i18n.t("StartWithWindows").into());
+    ui.set_i18n_start_minimized(i18n.t("StartMinimized").into());
+    ui.set_i18n_auto_route(i18n.t("AutoRoute").into());
+    ui.set_i18n_language(i18n.t("Language").into());
+    ui.set_i18n_cancel(i18n.t("Cancel").into());
+    ui.set_i18n_save(i18n.t("Save").into());
 }
 
 fn source_rows(controller: &AppController) -> Vec<SourceDevice> {
@@ -349,5 +575,96 @@ fn language_code_from_index(index: i32) -> &'static str {
     match index {
         1 => "zh",
         _ => "en",
+    }
+}
+
+/// 计算托盘弹窗在屏幕上的显示位置。
+///
+/// 默认在托盘图标上方偏移 `gap` 像素显示；当上方空间不足时改为显示在图标下方；
+/// 当右侧超出屏幕时向左回退；当左侧超出屏幕时夹到 0。
+fn compute_tray_popup_position(
+    anchor_rect: TrayAnchorRect,
+    popup_size: (i32, i32),
+    screen_size: (i32, i32),
+    gap: i32,
+) -> (i32, i32) {
+    let (popup_w, popup_h) = popup_size;
+    let (screen_w, _screen_h) = screen_size;
+
+    // X: 默认对齐锚点左边缘
+    let mut x = anchor_rect.x;
+    // 右侧超出 → 向左回退
+    if x + popup_w > screen_w {
+        x = screen_w - popup_w;
+    }
+    // 左侧超出 → 夹到 0
+    if x < 0 {
+        x = 0;
+    }
+
+    // Y: 默认在锚点上方
+    let mut y = anchor_rect.y - popup_h - gap;
+    // 上方空间不足 → 改为显示在锚点下方
+    if y < 0 {
+        y = anchor_rect.y + anchor_rect.height + gap;
+    }
+
+    (x, y)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn positions_popup_above_tray_icon_when_space_is_available() {
+        let anchor = TrayAnchorRect {
+            x: 1500,
+            y: 900,
+            width: 40,
+            height: 40,
+        };
+        let pos = compute_tray_popup_position(anchor, (220, 160), (1920, 1080), 8);
+        // 1500 < 1920-220, ok; y = 900-160-8 = 732
+        assert_eq!(pos, (1500, 732));
+    }
+
+    #[test]
+    fn clamps_x_when_popup_exceeds_right_edge() {
+        let anchor = TrayAnchorRect {
+            x: 1800,
+            y: 900,
+            width: 40,
+            height: 40,
+        };
+        let pos = compute_tray_popup_position(anchor, (220, 160), (1920, 1080), 8);
+        // 1800+220 > 1920 → x = 1920-220 = 1700
+        assert_eq!(pos, (1700, 732));
+    }
+
+    #[test]
+    fn falls_below_anchor_when_not_enough_space_above() {
+        let anchor = TrayAnchorRect {
+            x: 100,
+            y: 50,
+            width: 40,
+            height: 40,
+        };
+        let pos = compute_tray_popup_position(anchor, (220, 160), (1920, 1080), 8);
+        // y = 50-160-8 = -118 < 0 → y = 50+40+8 = 98
+        assert_eq!(pos, (100, 98));
+    }
+
+    #[test]
+    fn clamps_x_to_zero_when_screen_too_narrow() {
+        let anchor = TrayAnchorRect {
+            x: 10,
+            y: 900,
+            width: 40,
+            height: 40,
+        };
+        let pos = compute_tray_popup_position(anchor, (300, 160), (200, 1080), 8);
+        // x=10, 10+300 > 200 → x = 200-300 = -100 < 0 → x = 0
+        assert_eq!(pos, (0, 732));
     }
 }

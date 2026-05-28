@@ -1,0 +1,99 @@
+component PopupAction inherits Rectangle {
+    in property <string> text;
+    callback clicked();
+
+    height: 34px;
+    border-radius: 5px;
+    background: action-touch.has-hover ? #1b2a36 : #111827;
+
+    Text {
+        x: 10px;
+        width: parent.width - 20px;
+        height: parent.height;
+        text: root.text;
+        color: action-touch.has-hover ? #f0f3f7 : #cbd5e1;
+        font-size: 11px;
+        font-weight: 600;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    action-touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component TrayPopupWindow inherits Window {
+    in property <bool> routing-running;
+    callback show-main-window();
+    callback toggle-routing();
+    callback quit-app();
+    callback request-close();
+
+    title: "AudioRouter";
+    no-frame: true;
+    always-on-top: true;
+    preferred-width: 160px;
+    preferred-height: 168px;
+    min-width: 160px;
+    min-height: 168px;
+    max-width: 160px;
+    max-height: 168px;
+    background: transparent;
+
+    FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.request-close();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #0f1722;
+        border-color: #243041;
+        border-width: 1px;
+        border-radius: 6px;
+
+        VerticalLayout {
+            padding: 8px;
+            spacing: 6px;
+
+            Text {
+                height: 18px;
+                text: "AudioRouter";
+                color: #f0f3f7;
+                font-size: 11px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+
+            PopupAction {
+                text: "打开主窗口";
+                clicked => {
+                    root.show-main-window();
+                }
+            }
+
+            PopupAction {
+                text: root.routing-running ? "停止路由" : "启动路由";
+                clicked => {
+                    root.toggle-routing();
+                }
+            }
+
+            PopupAction {
+                text: "退出应用";
+                clicked => {
+                    root.quit-app();
+                }
+            }
+        }
+    }
+}
