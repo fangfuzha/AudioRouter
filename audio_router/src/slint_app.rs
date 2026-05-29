@@ -47,36 +47,10 @@ pub fn run_slint_app(
     let tray_popup = TrayPopupWindow::new()?;
     let controller = Rc::new(RefCell::new(AppController::new(config_manager, router)));
 
-    // 为托盘弹窗设置 Win32 圆角窗口区域
-    {
-        use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        use windows::Win32::Foundation::HWND;
-        use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
-
-        let scale = tray_popup
-            .window()
-            .with_winit_window(|w| w.scale_factor())
-            .unwrap_or(1.0);
-        let (pw, ph) = ((160.0 * scale) as i32, (168.0 * scale) as i32);
-        let radius = (6.0 * scale) as i32;
-
-        tray_popup.window().with_winit_window(|w| {
-            if let Ok(handle) = w.window_handle() {
-                if let RawWindowHandle::Win32(win32) = handle.as_raw() {
-                    let hwnd = HWND(win32.hwnd.get() as *mut _);
-                    let region = unsafe { CreateRoundRectRgn(0, 0, pw, ph, radius * 2, radius * 2) };
-                    unsafe {
-                        if SetWindowRgn(hwnd, region, true) == 0 {
-                            // SetWindowRgn 失败 → 我们仍持有 region，必须手动释放
-                            let _ = DeleteObject(region);
-                            log::warn!("SetWindowRgn failed");
-                        }
-                        // 成功 → 系统接管 region 所有权，不应 DeleteObject
-                    }
-                }
-            }
-        });
-    }
+    // 注意：弹窗的 Win32 窗口属性（圆角区域、WS_EX_TOOLWINDOW）不能在此处设置，
+    // 因为 Slint 使用延迟窗口创建，此时 HWND 尚不存在。
+    // 这些设置已移至 spawn_tray_command_bridge 的 ShowTrayPopup 分支中，
+    // 在 popup.show() 之后执行（此时 HWND 已创建）。
 
     ui.window().on_close_requested({
         let weak_ui = ui.as_weak();
@@ -243,9 +217,7 @@ fn spawn_tray_command_bridge(
                                 }
                             }
                         }
-                        TrayToAppCommand::ShowTrayPopup {
-                            anchor_rect,
-                        } => {
+                        TrayToAppCommand::ShowTrayPopup { anchor_rect } => {
                             if let Some(popup) = handles.popup_window.upgrade() {
                                 // 同步路由运行状态到弹窗
                                 let is_running = handles
@@ -260,8 +232,8 @@ fn spawn_tray_command_bridge(
                                     .window()
                                     .with_winit_window(|w| w.scale_factor())
                                     .unwrap_or(1.0);
-                                let popup_phys_w = (160.0 * scale) as i32;
-                                let popup_phys_h = (168.0 * scale) as i32;
+                                let popup_phys_w = (180.0 * scale) as i32;
+                                let popup_phys_h = (160.0 * scale) as i32;
 
                                 // 通过 available_monitors 查找包含锚点的显示器尺寸
                                 let screen_size = popup
@@ -313,6 +285,79 @@ fn spawn_tray_command_bridge(
                                     popup
                                         .window()
                                         .set_position(slint::PhysicalPosition::new(px, py));
+
+                                    // 此时 HWND 已创建，设置窗口属性
+                                    popup.window().with_winit_window(|w| {
+                                        use slint::winit_030::winit::raw_window_handle::{
+                                            HasWindowHandle, RawWindowHandle,
+                                        };
+                                        use windows::Win32::Foundation::HWND;
+                                        use windows::Win32::Graphics::Gdi::{
+                                            CreateRoundRectRgn, DeleteObject, SetWindowRgn,
+                                        };
+                                        use windows::Win32::UI::WindowsAndMessaging::{
+                                            GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos,
+                                            GWL_EXSTYLE, SWP_FRAMECHANGED, SWP_NOMOVE,
+                                            SWP_NOZORDER, SWP_NOSIZE, WS_EX_TOOLWINDOW,
+                                        };
+
+                                        if let Ok(handle) = w.window_handle() {
+                                            if let RawWindowHandle::Win32(win32) =
+                                                handle.as_raw()
+                                            {
+                                                let hwnd =
+                                                    HWND(win32.hwnd.get() as *mut _);
+
+                                                // 设置 WS_EX_TOOLWINDOW + SWP_FRAMECHANGED
+                                                unsafe {
+                                                    let ex_style = GetWindowLongPtrW(
+                                                        hwnd, GWL_EXSTYLE,
+                                                    );
+                                                    SetWindowLongPtrW(
+                                                        hwnd,
+                                                        GWL_EXSTYLE,
+                                                        ex_style
+                                                            | WS_EX_TOOLWINDOW.0 as isize,
+                                                    );
+                                                    let _ = SetWindowPos(
+                                                        hwnd,
+                                                        HWND::default(),
+                                                        0,
+                                                        0,
+                                                        0,
+                                                        0,
+                                                        SWP_NOMOVE
+                                                            | SWP_NOSIZE
+                                                            | SWP_NOZORDER
+                                                            | SWP_FRAMECHANGED,
+                                                    );
+                                                }
+
+                                                // 设置圆角窗口区域
+                                                let scale = w.scale_factor();
+                                                let pw = (180.0 * scale) as i32;
+                                                let ph = (160.0 * scale) as i32;
+                                                let radius = (8.0 * scale) as i32;
+                                                let region = unsafe {
+                                                    CreateRoundRectRgn(
+                                                        0,
+                                                        0,
+                                                        pw,
+                                                        ph,
+                                                        radius * 2,
+                                                        radius * 2,
+                                                    )
+                                                };
+                                                unsafe {
+                                                    if SetWindowRgn(hwnd, region, true) == 0 {
+                                                        let _ = DeleteObject(region);
+                                                        log::warn!("SetWindowRgn failed");
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    });
+
                                     // 强制焦点以启用失焦关闭
                                     popup.window().with_winit_window(|w| {
                                         w.focus_window();
@@ -379,6 +424,9 @@ fn spawn_update_check(weak_ui: slint::Weak<MainWindow>, locale: String) -> anyho
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak_ui.upgrade() {
                     ui.set_update_text(update_status_text(&status, &i18n).into());
+                    if let UpdateStatus::Available { html_url, .. } = &status {
+                        ui.set_update_url(html_url.as_str().into());
+                    }
                 }
             });
         })?;
@@ -390,7 +438,6 @@ fn update_status_text(status: &UpdateStatus, i18n: &crate::i18n::I18n) -> String
         UpdateStatus::Available { latest_version, .. } => i18n
             .t("UpdateAvailableVersion")
             .replace("{v}", latest_version),
-        UpdateStatus::Checking => i18n.t("CheckingUpdate").to_string(),
         UpdateStatus::Error(e) => i18n.t("UpdateCheckFailed").replace("{e}", &e.to_string()),
         UpdateStatus::Idle | UpdateStatus::UpToDate => String::new(),
     }
@@ -484,6 +531,17 @@ fn register_callbacks(
             }
         },
     );
+
+    // 点击更新提示 → 打开浏览器跳转下载页
+    let weak_ui = ui.as_weak();
+    ui.on_open_update_url(move || {
+        if let Some(ui) = weak_ui.upgrade() {
+            let url = ui.get_update_url();
+            if !url.is_empty() {
+                let _ = open::that(url.as_str());
+            }
+        }
+    });
 }
 
 fn update_main_window(ui: &MainWindow, controller: &AppController) {

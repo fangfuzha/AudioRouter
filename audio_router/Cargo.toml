@@ -32,6 +32,8 @@ env_logger = "0.11"
 # 图像加载（托盘图标、窗口图标）
 image = { version = "0.25", default-features = false, features = ["png"] }
 slint = { version = "1.16.1", features = ["unstable-winit-030"] }
+semver = "1.0.28"
+open = "5.3.5"
 
 [build-dependencies]
 slint-build = "1.16.1"

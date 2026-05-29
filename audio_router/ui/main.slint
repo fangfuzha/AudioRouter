@@ -77,6 +77,7 @@ export component MainWindow inherits Window {
     in property <string> i18n-language: "";
     in property <string> i18n-cancel: "";
     in property <string> i18n-save: "";
+    in property <string> update-url: "";
     callback toggle-routing();
     callback select-source(string);
     callback set-output-enabled(string, bool);
@@ -84,6 +85,7 @@ export component MainWindow inherits Window {
     callback open-settings();
     callback save-settings(bool, bool, bool, int);
     callback cancel-settings();
+    callback open-update-url();
 
     title: "AudioRouter";
     icon: @image-url("../assets/icon.png");
@@ -272,12 +274,24 @@ export component MainWindow inherits Window {
                     overflow: elide;
                 }
 
-                Text {
-                    text: root.update-text;
-                    color: #2bd97f;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                    overflow: elide;
+                Rectangle {
+                    visible: root.update-text != "";
+                    height: 20px;
+
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.open-update-url();
+                        }
+                    }
+
+                    Text {
+                        text: root.update-text;
+                        color: #2bd97f;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
                 }
 
                 Rectangle {
