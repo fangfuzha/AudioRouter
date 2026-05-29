@@ -16,20 +16,10 @@ pub struct TrayAnchorRect {
     pub height: i32,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct TrayClickPoint {
-    pub x: i32,
-    pub y: i32,
-}
-
 #[derive(Debug, Clone)]
 pub enum TrayToAppCommand {
     ShowWindow,
-    ShowTrayPopup {
-        anchor_rect: TrayAnchorRect,
-        click_pos: TrayClickPoint,
-    },
-    Quit,
+    ShowTrayPopup { anchor_rect: TrayAnchorRect },
 }
 
 #[derive(Debug, Clone)]
@@ -69,7 +59,6 @@ pub fn run_tray(rx: mpsc::Receiver<AppToTrayCommand>, tx: mpsc::Sender<TrayToApp
                 TrayIconEvent::Click {
                     button: tray_icon::MouseButton::Right,
                     button_state: tray_icon::MouseButtonState::Up,
-                    position,
                     rect,
                     ..
                 } => {
@@ -80,10 +69,6 @@ pub fn run_tray(rx: mpsc::Receiver<AppToTrayCommand>, tx: mpsc::Sender<TrayToApp
                             y: rect.position.y as i32,
                             width: rect.size.width as i32,
                             height: rect.size.height as i32,
-                        },
-                        click_pos: TrayClickPoint {
-                            x: position.x as i32,
-                            y: position.y as i32,
                         },
                     });
                 }

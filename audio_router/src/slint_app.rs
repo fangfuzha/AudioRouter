@@ -47,19 +47,31 @@ pub fn run_slint_app(
     let tray_popup = TrayPopupWindow::new()?;
     let controller = Rc::new(RefCell::new(AppController::new(config_manager, router)));
 
-    // 为托盘弹窗设置 Win32 圆角窗口区域（176×168, 圆角半径 6px）
+    // 为托盘弹窗设置 Win32 圆角窗口区域
     {
         use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
         use windows::Win32::Foundation::HWND;
-        use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
+        use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn};
+
+        let scale = tray_popup
+            .window()
+            .with_winit_window(|w| w.scale_factor())
+            .unwrap_or(1.0);
+        let (pw, ph) = ((160.0 * scale) as i32, (168.0 * scale) as i32);
+        let radius = (6.0 * scale) as i32;
+
         tray_popup.window().with_winit_window(|w| {
             if let Ok(handle) = w.window_handle() {
                 if let RawWindowHandle::Win32(win32) = handle.as_raw() {
                     let hwnd = HWND(win32.hwnd.get() as *mut _);
-                    // CreateRoundRectRgn: 左上右下 + 椭圆宽高（直径 = 2 × 半径）
-                    let region = unsafe { CreateRoundRectRgn(0, 0, 160, 168, 12, 12) };
+                    let region = unsafe { CreateRoundRectRgn(0, 0, pw, ph, radius * 2, radius * 2) };
                     unsafe {
-                        let _ = SetWindowRgn(hwnd, region, true);
+                        if SetWindowRgn(hwnd, region, true) == 0 {
+                            // SetWindowRgn 失败 → 我们仍持有 region，必须手动释放
+                            let _ = DeleteObject(region);
+                            log::warn!("SetWindowRgn failed");
+                        }
+                        // 成功 → 系统接管 region 所有权，不应 DeleteObject
                     }
                 }
             }
@@ -134,21 +146,28 @@ pub fn run_slint_app(
             let _ = slint::quit_event_loop();
         });
     }
-    // Esc 关闭弹窗
+    // Esc 关闭弹窗并归还焦点到主窗口
     {
         let weak_popup = tray_popup.as_weak();
+        let weak_ui = ui.as_weak();
         tray_popup.on_request_close(move || {
             if let Some(popup) = weak_popup.upgrade() {
                 let _ = popup.hide();
             }
+            // 归还焦点到主窗口（如果可见）
+            if let Some(ui) = weak_ui.upgrade() {
+                if ui.window().is_visible() {
+                    let _ = show_and_focus_window(&ui);
+                }
+            }
         });
     }
-    // 失焦关闭：用 Timer 轮询弹窗焦点状态
+    // 失焦关闭：用 Timer 轮询弹窗焦点状态（200ms 间隔）
     let _popup_focus_timer = {
         let popup_timer = Timer::default();
         let weak_popup = tray_popup.as_weak();
         let focus_state = Rc::new(RefCell::new(false));
-        popup_timer.start(TimerMode::Repeated, Duration::from_millis(100), move || {
+        popup_timer.start(TimerMode::Repeated, Duration::from_millis(200), move || {
             if let Some(popup) = weak_popup.upgrade() {
                 if popup.window().is_visible() {
                     let has_focus = popup
@@ -187,22 +206,21 @@ pub fn run_slint_app(
 
 /// 统一处理窗口拉起逻辑，供启动阶段与托盘事件复用。
 fn show_and_focus_window(ui: &MainWindow) -> Result<(), slint::PlatformError> {
-    log::info!("Show and focus window requested");
+    log::debug!("Show and focus window requested");
     ui.show()?;
 
     let window = ui.window();
     let was_minimized = window.is_minimized();
-    log::info!("Window minimized before restore: {}", was_minimized);
+    log::debug!("Window minimized before restore: {}", was_minimized);
     if was_minimized {
         window.set_minimized(false);
     }
 
     let used_winit = window.with_winit_window(|winit_window| {
-        log::info!("Using winit window activation path");
         winit_window.focus_window();
         winit_window.request_user_attention(None);
     });
-    log::info!("Winit activation available: {}", used_winit.is_some());
+    log::debug!("Winit activation available: {}", used_winit.is_some());
 
     Ok(())
 }
@@ -215,18 +233,18 @@ fn spawn_tray_command_bridge(
         .name("slint-tray-commands".into())
         .spawn(move || {
             while let Ok(cmd) = tray_rx.recv() {
-                let should_quit = matches!(cmd, TrayToAppCommand::Quit);
                 let handles = handles.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     match cmd {
                         TrayToAppCommand::ShowWindow => {
                             if let Some(ui) = handles.main_window.upgrade() {
-                                let _ = show_and_focus_window(&ui);
+                                if let Err(e) = show_and_focus_window(&ui) {
+                                    log::error!("Failed to show main window from tray: {e}");
+                                }
                             }
                         }
                         TrayToAppCommand::ShowTrayPopup {
                             anchor_rect,
-                            click_pos: _,
                         } => {
                             if let Some(popup) = handles.popup_window.upgrade() {
                                 // 同步路由运行状态到弹窗
@@ -237,37 +255,59 @@ fn spawn_tray_command_bridge(
                                     .unwrap_or(false);
                                 popup.set_routing_running(is_running);
 
-                                // 获取屏幕尺寸（通过 winit 查询当前显示器）
+                                // 获取 scale_factor 并计算物理像素弹窗尺寸
+                                let scale = popup
+                                    .window()
+                                    .with_winit_window(|w| w.scale_factor())
+                                    .unwrap_or(1.0);
+                                let popup_phys_w = (160.0 * scale) as i32;
+                                let popup_phys_h = (168.0 * scale) as i32;
+
+                                // 通过 available_monitors 查找包含锚点的显示器尺寸
                                 let screen_size = popup
                                     .window()
                                     .with_winit_window(|winit_window| {
-                                        winit_window
-                                            .current_monitor()
-                                            .map(|m| {
-                                                let s = m.size();
-                                                (s.width as i32, s.height as i32)
+                                        let ax = anchor_rect.x + anchor_rect.width / 2;
+                                        let ay = anchor_rect.y + anchor_rect.height / 2;
+                                        // 查找包含锚点中心的显示器
+                                        let best = winit_window
+                                            .available_monitors()
+                                            .find(|m| {
+                                                let pos = m.position();
+                                                let size = m.size();
+                                                let mx = pos.x as i32;
+                                                let my = pos.y as i32;
+                                                ax >= mx
+                                                    && ax < mx + size.width as i32
+                                                    && ay >= my
+                                                    && ay < my + size.height as i32
                                             })
-                                            .unwrap_or((
-                                                anchor_rect.x + anchor_rect.width + 220,
-                                                anchor_rect.y + anchor_rect.height + 200,
-                                            ))
+                                            .or_else(|| winit_window.current_monitor());
+                                        best.map(|m| {
+                                            let s = m.size();
+                                            (s.width as i32, s.height as i32)
+                                        })
                                     })
+                                    .flatten()
                                     .unwrap_or((
                                         anchor_rect.x + anchor_rect.width + 220,
                                         anchor_rect.y + anchor_rect.height + 200,
                                     ));
 
-                                // 弹窗物理像素尺寸（与 tray_popup.slint 中 max-width/max-height 一致）
-                                let popup_size = (160, 168);
                                 let gap = 8;
                                 let (px, py) = compute_tray_popup_position(
                                     anchor_rect,
-                                    popup_size,
+                                    (popup_phys_w, popup_phys_h),
                                     screen_size,
                                     gap,
                                 );
 
-                                if let Err(e) = popup.show() {
+                                // 已显示时仅更新位置，避免闪烁
+                                if popup.window().is_visible() {
+                                    popup
+                                        .window()
+                                        .set_position(slint::PhysicalPosition::new(px, py));
+                                } else if let Err(e) = popup.show() {
                                     log::error!("Show tray popup failed: {e}");
                                 } else {
                                     popup
@@ -277,28 +317,16 @@ fn spawn_tray_command_bridge(
                                     popup.window().with_winit_window(|w| {
                                         w.focus_window();
                                     });
-                                    log::info!("Tray popup shown at ({px}, {py})");
                                 }
+                                log::debug!("Tray popup shown at ({px}, {py})");
                             } else {
                                 log::warn!(
                                     "Show tray popup requested after popup window was released"
                                 );
                             }
                         }
-                        TrayToAppCommand::Quit => {
-                            if let Some(popup) = handles.popup_window.upgrade() {
-                                let _ = popup.hide();
-                            }
-                            if let Some(ui) = handles.main_window.upgrade() {
-                                let _ = ui.hide();
-                            }
-                            let _ = slint::quit_event_loop();
-                        }
                     }
                 });
-                if should_quit {
-                    break;
-                }
             }
         })?;
     Ok(())
@@ -589,7 +617,7 @@ fn compute_tray_popup_position(
     gap: i32,
 ) -> (i32, i32) {
     let (popup_w, popup_h) = popup_size;
-    let (screen_w, _screen_h) = screen_size;
+    let (screen_w, screen_h) = screen_size;
 
     // X: 默认对齐锚点左边缘
     let mut x = anchor_rect.x;
@@ -607,6 +635,10 @@ fn compute_tray_popup_position(
     // 上方空间不足 → 改为显示在锚点下方
     if y < 0 {
         y = anchor_rect.y + anchor_rect.height + gap;
+    }
+    // 下方也溢出 → 贴顶
+    if y + popup_h > screen_h {
+        y = 0;
     }
 
     (x, y)
