@@ -32,7 +32,10 @@ PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+; 中文是 Inno Setup 官方语言包,但 Chocolatey 安装的 Inno Setup 6
+; 不包含 Languages\ 子目录下的语言文件,因此把 ChineseSimplified.isl
+; 随项目一起打包,用相对路径引用。英文用编译器自带的 Default.isl。
+Name: "chinesesimplified"; MessagesFile: "Languages\ChineseSimplified.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
