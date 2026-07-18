@@ -30,8 +30,6 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 AppCopyright=Copyright (C) 2026
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
-WizardImageFile=compiler:WizModernImage-IS.bmp
-WizardSmallImageFile=compiler:WizModernSmallImage-IS.bmp
 
 [Languages]
 Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
