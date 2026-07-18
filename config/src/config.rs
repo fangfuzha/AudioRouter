@@ -22,6 +22,20 @@ pub struct General {
     pub minimized: bool,          // Whether to start minimized to tray
     pub start_with_windows: bool, // Whether to launch app at system startup
     pub auto_route: bool,         // Whether to auto-start routing on app launch
+    #[serde(default = "default_true")]
+    pub nav_pane_expanded: bool,  // Whether the navigation pane is expanded
+    #[serde(default)]
+    pub backdrop: Backdrop,       // Window backdrop material
+    #[serde(default = "default_true")]
+    pub close_to_tray: bool,      // Whether closing the window minimizes to tray
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub enum Backdrop {
+    #[default]
+    Mica,
+    MicaAlt,
+    Acrylic,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -85,6 +99,9 @@ impl Default for Config {
                 auto_route: false,
                 minimized: false,
                 start_with_windows: false,
+                nav_pane_expanded: true,
+                backdrop: Backdrop::default(),
+                close_to_tray: true,
             },
             source_device_id: String::new(),
             outputs: Vec::new(),
@@ -203,6 +220,9 @@ mod tests {
                 auto_route: false,
                 minimized: false,
                 start_with_windows: false,
+                nav_pane_expanded: true,
+                backdrop: Backdrop::default(),
+                close_to_tray: true,
             },
             source_device_id: "src1".to_string(),
             outputs: vec![Output {

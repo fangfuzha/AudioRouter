@@ -80,11 +80,11 @@ mod tests {
     #[test]
     fn quotes_autostart_path() {
         let cmd = autostart_command(std::path::PathBuf::from(
-            r"C:\Program Files\AudioRouter\audio_router.exe",
+            r"C:\Program Files\AudioRouter\winui3_gui.exe",
         ));
         assert_eq!(
             cmd,
-            r#""C:\Program Files\AudioRouter\audio_router.exe" --minimized"#
+            r#""C:\Program Files\AudioRouter\winui3_gui.exe" --minimized"#
         );
     }
 }

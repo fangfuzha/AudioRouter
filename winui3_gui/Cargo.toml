@@ -1,0 +1,22 @@
+[package]
+name = "winui3_gui"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.95"
+
+[dependencies]
+app_core = { path = "../app_core" }
+audio_core = { path = "../audio_core" }
+config = { path = "../config" }
+windows-reactor = { git = "https://github.com/microsoft/windows-rs", branch = "master" }
+windows-core = { version = "0.62.2", features = ["std"] }
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1"
+dark-light = "2"
+tray-icon = "0.19"
+image = { version = "0.25", default-features = false, features = ["png"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+[build-dependencies]
+windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", branch = "master" }

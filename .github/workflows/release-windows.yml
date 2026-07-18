@@ -1,5 +1,5 @@
-# Release 工作流：为 Windows 构建并发布 audio_router.exe
-# 触发：push 到语义化 tag（例如 v1.2.3）会创建 GitHub Release 并上传 exe
+# Release 工作流：为 Windows 构建并用 Inno Setup 打包发布
+# 触发：push 到语义化 tag（例如 v1.2.3）会创建 GitHub Release 并上传安装包
 name: "Release — Windows"
 
 on:
@@ -11,7 +11,19 @@ on:
       tag:
         description: "要发布的 tag，例如 v1.0.0"
         required: false
+  workflow_call:
+    inputs:
+      tag:
+        description: "要发布的 tag，例如 v1.0.0"
+        required: false
+        type: string
 
+# 同一 tag 的并发构建只保留最新一次，避免重复劳动
+concurrency:
+  group: release-windows-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: true
+
+# 仅保留实际需要的权限
 permissions:
   contents: write
 
@@ -19,9 +31,18 @@ jobs:
   build-windows:
     name: Build & release (Windows)
     runs-on: windows-latest
+    # 防止异常任务卡死 runner
+    timeout-minutes: 30
+
     env:
       WINDOWS_SIGN_CERT: ${{ secrets.WINDOWS_SIGN_CERT }}
       WINDOWS_SIGN_PASSWORD: ${{ secrets.WINDOWS_SIGN_PASSWORD }}
+      # Rust 构建优化
+      CARGO_INCREMENTAL: 0
+      CARGO_NET_RETRY: 3
+      RUSTUP_MAX_RETRY: 3
+      # signtool 在签名步骤中复用，避免重复扫描 Windows Kits 目录
+      SIGNTOOL_PATH: ""
 
     steps:
       - name: Checkout repository
@@ -31,6 +52,7 @@ jobs:
           fetch-tags: true
 
       - name: Resolve release tag
+        id: resolve_tag
         shell: pwsh
         run: |
           if ('${{ github.event.inputs.tag }}' -ne '') {
@@ -45,7 +67,11 @@ jobs:
             Write-Error "Invalid tag format: $tag"
             exit 1
           }
+          # 从 tag (如 v1.2.3) 提取纯版本号 (1.2.3) 供 Inno Setup 使用
+          $version = $tag -replace '^[vV]', ''
           echo "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
+          echo "RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+          Write-Host "Resolved tag: $tag, version: $version"
 
       - name: Checkout release tag
         shell: pwsh
@@ -56,28 +82,49 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Cache cargo registry
+      # 使用专业的 Rust 缓存 action：
+      # 自动处理 ~/.cargo/{registry,git,bin} 和 target 目录，
+      # 根据 Cargo.lock / 工具链 / 操作系统自动生成 key，
+      # 并支持 shared target dir、lockfile 哈希分层等高级特性。
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+          shared-key: "release-windows"
+
+      # 缓存 Inno Setup 安装目录，避免每次 choco install（约省 30-60s）
+      - name: Cache Inno Setup
+        id: cache-inno
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          path: C:\Program Files (x86)\Inno Setup 6
+          key: innosetup-6-v1
 
-      - name: Cache cargo build artifacts
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-target-
+      - name: Install Inno Setup 6
+        if: steps.cache-inno.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress --no-upgrade-check
 
-      - name: Build audio_router (release)
-        # 使用 cargo 构建原生 Windows 二进制（无 WebView/Node.js 依赖）
-        run: cargo build --locked --release --package audio_router
+      - name: Add Inno Setup to PATH
+        shell: pwsh
+        run: |
+          $innoDir = "C:\Program Files (x86)\Inno Setup 6"
+          if (Test-Path (Join-Path $innoDir "ISCC.exe")) {
+            Add-Content -Path $env:GITHUB_PATH -Value $innoDir
+            Write-Host "Added $innoDir to GITHUB_PATH"
+          } else {
+            Write-Error "ISCC.exe not found at $innoDir"
+            exit 1
+          }
 
-      - name: Decode & import PFX (only if provided)
+      - name: Build winui3_gui (release)
+        run: cargo build --locked --release --package winui3_gui
+
+      # 合并 PFX 解码与 signtool 定位，只执行一次（有证书时）
+      - name: Prepare code signing
         if: ${{ env.WINDOWS_SIGN_CERT && env.WINDOWS_SIGN_PASSWORD }}
+        id: prepare_sign
         shell: pwsh
         run: |
           Write-Host "Decoding PFX from secret and writing to runner temp"
@@ -85,11 +132,7 @@ jobs:
           Write-Host "Importing PFX into personal cert store"
           certutil -f -p "${{ env.WINDOWS_SIGN_PASSWORD }}" -importpfx "$env:RUNNER_TEMP\codesign.pfx"
 
-      - name: Sign executable (only if cert provided)
-        if: ${{ env.WINDOWS_SIGN_CERT && env.WINDOWS_SIGN_PASSWORD }}
-        shell: pwsh
-        run: |
-          Write-Host "Signing exe"
+          # 一次性查找 signtool.exe，结果存到 GITHUB_ENV 供后续步骤复用
           $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
             Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
             Sort-Object FullName -Descending |
@@ -98,14 +141,78 @@ jobs:
             Write-Error "signtool.exe not found"
             exit 1
           }
-          & $signtool.FullName sign /v /fd SHA256 /a /tr http://timestamp.digicert.com /td SHA256 "target\release\audio_router.exe"
+          echo "SIGNTOOL_PATH=$($signtool.FullName)" >> $env:GITHUB_ENV
+          Write-Host "Found signtool: $($signtool.FullName)"
+
+      - name: Sign executable (only if cert provided)
+        if: ${{ env.WINDOWS_SIGN_CERT && env.WINDOWS_SIGN_PASSWORD }}
+        shell: pwsh
+        run: |
+          Write-Host "Signing exe"
+          & $env:SIGNTOOL_PATH sign /v /fd SHA256 /a /tr http://timestamp.digicert.com /td SHA256 "target\release\winui3_gui.exe"
+
+      - name: Build installer with Inno Setup
+        shell: pwsh
+        run: |
+          Write-Host "Building installer for version $env:RELEASE_VERSION"
+          # 使用项目自带的打包脚本，跳过 cargo build（已在上一步完成）
+          & .\scripts\build-installer.ps1 -NoBuild -Version $env:RELEASE_VERSION
+
+      - name: Sign installer (only if cert provided)
+        if: ${{ env.WINDOWS_SIGN_CERT && env.WINDOWS_SIGN_PASSWORD }}
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem ".\installer\Output\AudioRouter-Setup-*.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $installer) {
+            Write-Error "Installer not found"
+            exit 1
+          }
+          Write-Host "Signing installer: $($installer.FullName)"
+          & $env:SIGNTOOL_PATH sign /v /fd SHA256 /a /tr http://timestamp.digicert.com /td SHA256 $installer.FullName
+
+      # 构建失败时上传日志和中间产物便于排查
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ env.RELEASE_TAG || 'untagged' }}
+          path: |
+            target/release/winui3_gui.exe
+            installer/Output/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Verify installer
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem ".\installer\Output\AudioRouter-Setup-*.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $installer) {
+            Write-Error "Installer not found!"
+            exit 1
+          }
+          $sizeMB = [math]::Round($installer.Length / 1MB, 2)
+          Write-Host "Installer: $($installer.Name)"
+          Write-Host "Size: $sizeMB MB"
+
+          # 写入构建摘要，GitHub Release/Actions 页面会展示
+          $summary = @"
+          ## Build Summary
+
+          | Item | Value |
+          |------|-------|
+          | Version | ``$env:RELEASE_VERSION`` |
+          | Installer | ``$($installer.Name)`` |
+          | Size | $sizeMB MB |
+          | Signed | $(if ($env:WINDOWS_SIGN_CERT) { 'Yes' } else { 'No' }) |
+          "@
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           files: |
-            target/release/audio_router.exe
-          fail_on_unmatched_files: false
+            installer/Output/AudioRouter-Setup-*.exe
+          fail_on_unmatched_files: true
           generate_release_notes: true
           name: AudioRouter ${{ env.RELEASE_TAG }}

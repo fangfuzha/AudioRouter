@@ -9,6 +9,7 @@ mod worker;
 
 pub use config::{ChannelMode, RouterConfig, RouterTarget};
 pub use state::RouterState;
+pub use worker::WorkerEvent;
 
 use anyhow::{Result, anyhow};
 use parking_lot::RwLock;
@@ -55,16 +56,19 @@ impl Router {
 
         let (stop_tx, stop_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
         let cfg_for_worker = cfg.clone();
 
-        let handle =
-            thread::spawn(move || worker::run_worker(cfg_for_worker, cb, stop_rx, ready_tx));
+        let handle = thread::spawn(move || {
+            worker::run_worker(cfg_for_worker, cb, stop_rx, ready_tx, event_tx)
+        });
 
         match ready_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(Ok(())) => {
                 let mut st = self.inner.write();
                 st.worker_stop_tx = Some(stop_tx);
                 st.worker_join = Some(handle);
+                st.worker_event_rx = Some(std::sync::Mutex::new(event_rx));
                 Ok(())
             }
             Ok(Err(e)) => {
@@ -140,12 +144,42 @@ impl Router {
         self.inner.read().running
     }
 
+    /// 轮询 worker 事件。应定期调用（如 GUI 定时器）以同步状态。
+    ///
+    /// 返回所有待处理的事件。如果 worker 已退出（Failed 事件之后），
+    /// 会自动清理 running 状态。
+    pub fn poll_events(&self) -> Vec<WorkerEvent> {
+        let mut events = Vec::new();
+        let mut should_reset = false;
+
+        {
+            let st = self.inner.read();
+            if let Some(rx) = &st.worker_event_rx {
+                if let Ok(rx) = rx.lock() {
+                    while let Ok(ev) = rx.try_recv() {
+                        if matches!(ev, WorkerEvent::Failed(_)) {
+                            should_reset = true;
+                        }
+                        events.push(ev);
+                    }
+                }
+            }
+        }
+
+        if should_reset {
+            self.reset_state();
+        }
+
+        events
+    }
+
     fn reset_state(&self) {
         let mut st = self.inner.write();
         st.running = false;
         st.cfg = RouterConfig::default();
         st.worker_stop_tx = None;
         st.worker_join = None;
+        st.worker_event_rx = None;
     }
 }
 

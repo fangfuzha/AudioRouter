@@ -80,6 +80,44 @@ impl AppController {
         }
     }
 
+    /// 轮询路由 worker 事件，同步运行状态到 GUI。
+    /// 应由 GUI 定时器定期调用（与 refresh_devices 同频率）。
+    pub fn poll_router_events(&mut self) {
+        use audio_core::router::WorkerEvent;
+
+        let events = self.router.poll_events();
+        if events.is_empty() {
+            return;
+        }
+
+        for ev in events {
+            match ev {
+                WorkerEvent::Started => {
+                    self.is_running = true;
+                }
+                WorkerEvent::Restarting => {
+                    self.status_text = self.i18n.t("Restarting").to_string();
+                    log::info!("Router: {}", self.status_text);
+                }
+                WorkerEvent::Restarted => {
+                    self.is_running = true;
+                    self.status_text = self.i18n.t("Restarted").to_string();
+                    log::info!("Router: {}", self.status_text);
+                    // 短暂延迟后恢复正常的 "Running" 状态文本
+                    // 下次 refresh_devices 或状态变化时会自然更新
+                }
+                WorkerEvent::Failed(msg) => {
+                    self.is_running = false;
+                    self.status_text = self
+                        .i18n
+                        .t("RoutingFailed")
+                        .replace("{error}", &msg);
+                    log::error!("Router failed: {msg}");
+                }
+            }
+        }
+    }
+
     pub fn select_source_device(&mut self, device_id: String) {
         self.selected_source = Some(device_id);
         self.save_routing_config();
@@ -166,6 +204,26 @@ impl AppController {
     pub fn begin_settings_edit(&mut self) {
         let cfg = self.config_manager.handle().read().clone();
         self.draft_general = cfg.general;
+    }
+
+    pub fn nav_pane_expanded(&self) -> bool {
+        self.config_manager.handle().read().general.nav_pane_expanded
+    }
+
+    pub fn set_nav_pane_expanded(&mut self, expanded: bool) {
+        if let Err(e) = self.config_manager.update(|cfg| {
+            cfg.general.nav_pane_expanded = expanded;
+        }) {
+            log::error!("Save nav pane expanded failed: {e}");
+        }
+    }
+
+    pub fn backdrop(&self) -> config::config::Backdrop {
+        self.config_manager.handle().read().general.backdrop
+    }
+
+    pub fn close_to_tray(&self) -> bool {
+        self.config_manager.handle().read().general.close_to_tray
     }
 
     pub fn save_general_config(&mut self) -> Option<String> {
