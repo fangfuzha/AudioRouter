@@ -110,27 +110,14 @@ pub fn try_recv_menu_event() -> Option<TrayCommand> {
 }
 
 fn load_icon() -> anyhow::Result<Icon> {
-    // 优先尝试加载同目录下的 icon.png
-    let icon_path = std::env::current_exe()?
+    let exe_dir = std::env::current_exe()?
         .parent()
-        .unwrap_or(std::path::Path::new("."))
-        .join("icon.png");
+        .unwrap_or(std::path::Path::new("."));
+
+    let icon_path = exe_dir.join("assets").join("icon.png");
 
     if icon_path.exists() {
         let image = image::open(&icon_path)?.into_rgba8();
-        let (width, height) = image.dimensions();
-        return Ok(Icon::from_rgba(image.into_raw(), width, height)?);
-    }
-
-    // 回退：尝试加载项目资源目录中的图标
-    let resource_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
-        .join("assets")
-        .join("icon.png");
-
-    if resource_path.exists() {
-        let image = image::open(&resource_path)?.into_rgba8();
         let (width, height) = image.dimensions();
         return Ok(Icon::from_rgba(image.into_raw(), width, height)?);
     }

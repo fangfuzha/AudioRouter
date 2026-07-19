@@ -58,12 +58,11 @@ fn main() -> windows_reactor::Result<()> {
         config::config::Backdrop::Acrylic => Backdrop::Acrylic,
     };
 
-    // 窗口图标：使用项目根目录 assets/icon.ico
-    let icon_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
-        .join("assets")
-        .join("icon.ico");
+    let icon_path = {
+        let exe_path = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("winui3_gui.exe"));
+        let exe_dir = exe_path.parent().unwrap_or(std::path::Path::new("."));
+        exe_dir.join("assets").join("icon.ico")
+    };
 
     log::info!("Starting AudioRouter WinUI3 GUI...");
     let mut app = App::new()
