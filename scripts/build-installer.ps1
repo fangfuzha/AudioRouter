@@ -99,6 +99,45 @@ Write-Host "Executable: $exePath ($exeSize MB)" -ForegroundColor Green
 $dllCount = (Get-ChildItem (Join-Path $TargetDir "*.dll")).Count
 Write-Host "Runtime DLLs: $dllCount files" -ForegroundColor Green
 
+# 创建 staging 目录，只复制运行时必需的文件
+# 排除 cargo 构建产物（.fingerprint/deps/incremental/build/examples）、
+# 调试符号（pdb）、链接器产物（exp/lib）、依赖文件（.d）
+# 包含 WinUI 3 必需的 .pri 资源索引和 xx-XX 语言资源目录
+$StagingDir = Join-Path $ProjectRoot "target\installer-staging"
+if (Test-Path $StagingDir) {
+    Remove-Item $StagingDir -Recurse -Force
+}
+New-Item -ItemType Directory -Path $StagingDir -Force | Out-Null
+
+Write-Host ""
+Write-Host "=== Staging runtime files ===" -ForegroundColor Cyan
+
+# 复制根目录下的运行时文件（exe/dll/pri）
+$runtimeFiles = Get-ChildItem $TargetDir -File | Where-Object {
+    $_.Extension.ToLower() -in ".exe", ".dll", ".pri"
+}
+foreach ($f in $runtimeFiles) {
+    Copy-Item $f.FullName -Destination $StagingDir -Force
+}
+Write-Host "  Root files: $($runtimeFiles.Count)"
+
+# 复制语言资源子目录（xx-XX 格式，含 .mui 文件）
+$langDirs = Get-ChildItem $TargetDir -Directory | Where-Object { $_.Name -match '^[a-z]{2}-' }
+foreach ($d in $langDirs) {
+    Copy-Item $d.FullName -Destination $StagingDir -Recurse -Force
+}
+Write-Host "  Language dirs: $($langDirs.Count)"
+
+# 复制 Microsoft.UI.Xaml 框架资源子目录
+$xamlDir = Join-Path $TargetDir "Microsoft.UI.Xaml"
+if (Test-Path $xamlDir) {
+    Copy-Item $xamlDir -Destination $StagingDir -Recurse -Force
+    Write-Host "  Microsoft.UI.Xaml: copied"
+}
+
+$stagingSize = [math]::Round((Get-ChildItem $StagingDir -Recurse -File | Measure-Object Length -Sum).Sum / 1MB, 2)
+Write-Host "  Staging size: $stagingSize MB" -ForegroundColor Green
+
 if (-not (Test-Path $OutputDir)) {
     New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 }

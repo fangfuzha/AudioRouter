@@ -42,13 +42,17 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-; 主程序
-Source: "..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+; WinUI 3 自包含部署：从 staging 目录复制所有运行时文件
+; staging 目录由 build-installer.ps1 预先准备，只包含运行时必需的文件：
+; - exe/dll/pri（XAML 资源索引，WinUI 3 必需）
+; - xx-XX\*.mui（语言资源）
+; - Microsoft.UI.Xaml\Assets\*（框架资源）
+;
+; 注意：.pri 文件是 WinUI 3 必需的 XAML 资源索引，缺少会导致窗口创建
+; 失败后静默退出。.mui 文件是框架多语言资源，按系统语言加载。
+Source: "..\target\installer-staging\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
-; WinUI 3 / WinAppSDK 运行时 DLL（自包含部署，位于 target/release 根目录）
-Source: "..\target\release\*.dll"; DestDir: "{app}"; Flags: ignoreversion
-
-; 资源文件
+; 应用资源文件（图标等）
 Source: "..\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
