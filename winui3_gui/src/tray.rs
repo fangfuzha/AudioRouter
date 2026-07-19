@@ -110,9 +110,8 @@ pub fn try_recv_menu_event() -> Option<TrayCommand> {
 }
 
 fn load_icon() -> anyhow::Result<Icon> {
-    let exe_dir = std::env::current_exe()?
-        .parent()
-        .unwrap_or(std::path::Path::new("."));
+    let exe_path = std::env::current_exe()?;
+    let exe_dir = exe_path.parent().unwrap_or(std::path::Path::new("."));
 
     let icon_path = exe_dir.join("assets").join("icon.png");
 
