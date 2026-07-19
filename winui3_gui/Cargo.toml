@@ -8,7 +8,7 @@ rust-version = "1.95"
 app_core = { path = "../app_core" }
 audio_core = { path = "../audio_core" }
 config = { path = "../config" }
-windows-reactor = { git = "https://github.com/microsoft/windows-rs", branch = "master" }
+windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "f0a52dd530fce4fbcee7e9d8594df019e4302ea2" }
 windows-core = { version = "0.62.2", features = ["std"] }
 log = "0.4"
 env_logger = "0.11"
@@ -19,4 +19,4 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [build-dependencies]
-windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", branch = "master" }
+windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", rev = "f0a52dd530fce4fbcee7e9d8594df019e4302ea2" }
