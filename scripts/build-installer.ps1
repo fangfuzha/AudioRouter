@@ -29,7 +29,9 @@ function Find-InnoSetup {
         "D:\Program Files (x86)\Inno Setup 6\ISCC.exe",
         "D:\Program Files\Inno Setup 6\ISCC.exe",
         "E:\Program Files (x86)\Inno Setup 6\ISCC.exe",
-        "E:\Program Files\Inno Setup 6\ISCC.exe"
+        "E:\Program Files\Inno Setup 6\ISCC.exe",
+        # winget 默认安装到用户目录
+        "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
     )
     foreach ($c in $candidates) {
         if (Test-Path $c) { return $c }

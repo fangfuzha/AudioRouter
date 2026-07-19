@@ -1,6 +1,6 @@
 [package]
 name = "winui3_gui"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 rust-version = "1.95"
 
@@ -8,6 +8,9 @@ rust-version = "1.95"
 app_core = { path = "../app_core" }
 audio_core = { path = "../audio_core" }
 config = { path = "../config" }
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+serde = { version = "1", features = ["derive"] }
+semver = { version = "1", features = ["serde"] }
 windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "f0a52dd530fce4fbcee7e9d8594df019e4302ea2" }
 windows-core = { version = "0.62.2", features = ["std"] }
 log = "0.4"
@@ -16,7 +19,10 @@ anyhow = "1"
 dark-light = "2"
 tray-icon = "0.19"
 image = { version = "0.25", default-features = false, features = ["png"] }
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Security"] }
 
 [build-dependencies]
 windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", rev = "f0a52dd530fce4fbcee7e9d8594df019e4302ea2" }
+# 把 assets/icon.ico 嵌入到 exe 资源段，使 exe 在任务栏/开始菜单/资源管理器
+# 中显示项目图标（不依赖外部文件）。
+winres = "0.1"

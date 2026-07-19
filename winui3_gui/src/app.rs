@@ -10,6 +10,32 @@ use windows_reactor::*;
 use crate::tray::TrayCommand;
 use crate::window_utils;
 
+/// 更新状态机，用于设置页面的 UI 展示
+#[derive(Clone)]
+pub enum UpdateState {
+    Idle,
+    Checking,
+    UpToDate,
+    Available {
+        version: String,
+        download_url: String,
+        release_notes: String,
+        file_size: u64,
+    },
+    Downloading {
+        downloaded: u64,
+        total: u64,
+    },
+    Ready(std::path::PathBuf),
+    Failed(String),
+}
+
+impl Default for UpdateState {
+    fn default() -> Self {
+        Self::Idle
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum ThemeChoice {
     FollowSystem,
@@ -43,6 +69,7 @@ pub struct RootComponent {
     tick: Cell<u64>,
     set_tick: RefCell<Option<SetState<u64>>>,
     timer: RefCell<Option<DispatcherTimer>>,
+    update_state: Arc<Mutex<UpdateState>>,
 }
 
 impl RootComponent {
@@ -52,6 +79,7 @@ impl RootComponent {
             tick: Cell::new(0),
             set_tick: RefCell::new(None),
             timer: RefCell::new(None),
+            update_state: Arc::new(Mutex::new(UpdateState::Idle)),
         }
     }
 }
@@ -104,6 +132,52 @@ impl Component for RootComponent {
             window_utils::install_close_to_tray();
         });
 
+        // 启动时后台静默检查更新（受配置控制）
+        let auto_update_enabled = {
+            let c = self.controller.lock().unwrap();
+            let cfg = c.config_manager.handle();
+            let enabled = cfg.read().general.auto_update_check;
+            enabled
+        };
+        let update_state_clone = Arc::clone(&self.update_state);
+        cx.use_effect(auto_update_enabled, move || {
+            if !auto_update_enabled {
+                return;
+            }
+            let state = Arc::clone(&update_state_clone);
+            std::thread::spawn(move || {
+                // 延迟 2 秒再检查，避免影响启动速度
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let result = crate::update::check_for_updates();
+                let new_state = match result {
+                    crate::update::UpdateCheckResult::UpToDate => {
+                        log::info!("Update check: already up to date (v{})", crate::update::current_version());
+                        UpdateState::UpToDate
+                    }
+                    crate::update::UpdateCheckResult::NewVersion {
+                        version,
+                        download_url,
+                        release_notes,
+                        file_size,
+                    } => {
+                        log::info!("Update check: new version {version} available");
+                        UpdateState::Available {
+                            version,
+                            download_url,
+                            release_notes,
+                            file_size,
+                        }
+                    }
+                    crate::update::UpdateCheckResult::Failed(e) => {
+                        log::warn!("Update check failed: {e}");
+                        return;
+                    }
+                };
+                *state.lock().unwrap() = new_state;
+                // UI 重渲染依赖主循环的 700ms timer 自动触发
+            });
+        });
+
         if self.timer.borrow().is_none() {
             let controller = Arc::clone(&self.controller);
             let tick_cell = self.tick.clone();
@@ -152,6 +226,7 @@ impl Component for RootComponent {
             set_nav_selected,
             theme_choice,
             set_theme_choice,
+            Arc::clone(&self.update_state),
         )
     }
 }
@@ -165,6 +240,7 @@ fn main_app(
     set_nav_selected: SetState<String>,
     theme_choice: ThemeChoice,
     set_theme_choice: SetState<ThemeChoice>,
+    update_state: Arc<Mutex<UpdateState>>,
 ) -> Element {
     let c = controller.lock().unwrap();
     let i18n = c.i18n.clone();
@@ -192,6 +268,7 @@ fn main_app(
             set_nav_selected.clone(),
             theme_choice,
             set_theme_choice,
+            Arc::clone(&update_state),
         )
     } else {
         home_page(
@@ -431,8 +508,9 @@ fn settings_page(
     set_nav_selected: SetState<String>,
     theme_choice: ThemeChoice,
     set_theme_choice: SetState<ThemeChoice>,
+    update_state: Arc<Mutex<UpdateState>>,
 ) -> Element {
-    let (start_with_windows, start_minimized, auto_route, close_to_tray, lang_index, theme_index, backdrop_index) = {
+    let (start_with_windows, start_minimized, auto_route, close_to_tray, auto_update_check, lang_index, theme_index, backdrop_index) = {
         let c = controller.lock().unwrap();
         let draft = &c.draft_general;
         let lang_idx = match draft.language.as_str() {
@@ -454,6 +532,7 @@ fn settings_page(
             draft.minimized,
             draft.auto_route,
             draft.close_to_tray,
+            draft.auto_update_check,
             lang_idx,
             theme_idx,
             backdrop_idx,
@@ -546,6 +625,17 @@ fn settings_page(
                                 }),
                         ),
                         Element::from(
+                            check_box(auto_update_check)
+                                .content(i18n.t("AutoUpdateCheck"))
+                                .on_checked({
+                                    let controller_clone = Arc::clone(&controller);
+                                    move |checked| {
+                                        let mut c = controller_clone.lock().unwrap();
+                                        c.draft_general.auto_update_check = checked;
+                                    }
+                                }),
+                        ),
+                        Element::from(
                             hstack((
                                 Element::from(text_block(i18n.t("Language"))),
                                 Element::from(
@@ -621,6 +711,10 @@ fn settings_page(
                 .background(ThemeRef::LayerFill)
                 .corner_radius(8.0),
             ),
+            Element::from(build_update_section(
+                Arc::clone(&update_state),
+                i18n.clone(),
+            )),
             Element::from(
                 hstack((Element::from(cancel_btn), Element::from(save_btn)))
                     .spacing(8.0)
@@ -629,5 +723,227 @@ fn settings_page(
         ))
         .spacing(12.0)
         .padding(Thickness { left: 16.0, top: 12.0, right: 16.0, bottom: 16.0 }),
+    )
+}
+
+/// 构建设置页面中的更新区域，根据 UpdateState 展示不同 UI。
+///
+/// 后台线程只修改共享的 UpdateState，UI 更新依赖主循环的 700ms timer
+/// 触发重渲染。这样避免了把 Rc<SetState> 传到后台线程的问题。
+fn build_update_section(
+    update_state: Arc<Mutex<UpdateState>>,
+    i18n: app_core::i18n::I18n,
+) -> Element {
+    let state = update_state.lock().unwrap().clone();
+    let current_ver = crate::update::current_version();
+
+    let header = hstack((
+        Element::from(text_block(i18n.t("CheckForUpdates")).bold()),
+        Element::from(text_block(format!("v{current_ver}")).font_size(12.0)),
+    ))
+    .spacing(8.0);
+
+    let body: Element = match state {
+        UpdateState::Idle => {
+            let state_clone = Arc::clone(&update_state);
+            let btn = button(i18n.t("CheckForUpdates")).on_click(move || {
+                *state_clone.lock().unwrap() = UpdateState::Checking;
+                let sc = Arc::clone(&state_clone);
+                std::thread::spawn(move || {
+                    let result = crate::update::check_for_updates();
+                    let new_state = match result {
+                        crate::update::UpdateCheckResult::UpToDate => UpdateState::UpToDate,
+                        crate::update::UpdateCheckResult::NewVersion {
+                            version,
+                            download_url,
+                            release_notes,
+                            file_size,
+                        } => UpdateState::Available {
+                            version,
+                            download_url,
+                            release_notes,
+                            file_size,
+                        },
+                        crate::update::UpdateCheckResult::Failed(e) => UpdateState::Failed(e),
+                    };
+                    *sc.lock().unwrap() = new_state;
+                });
+            });
+            Element::from(btn)
+        }
+        UpdateState::Checking => {
+            Element::from(vstack((
+                Element::from(ProgressBar::indeterminate()),
+                Element::from(text_block(i18n.t("CheckingForUpdates")).font_size(12.0)),
+            ))
+            .spacing(8.0))
+        }
+        UpdateState::UpToDate => {
+            let state_clone = Arc::clone(&update_state);
+            let btn = button(i18n.t("CheckForUpdates")).on_click(move || {
+                *state_clone.lock().unwrap() = UpdateState::Checking;
+                let sc = Arc::clone(&state_clone);
+                std::thread::spawn(move || {
+                    let result = crate::update::check_for_updates();
+                    let new_state = match result {
+                        crate::update::UpdateCheckResult::UpToDate => UpdateState::UpToDate,
+                        crate::update::UpdateCheckResult::NewVersion {
+                            version,
+                            download_url,
+                            release_notes,
+                            file_size,
+                        } => UpdateState::Available {
+                            version,
+                            download_url,
+                            release_notes,
+                            file_size,
+                        },
+                        crate::update::UpdateCheckResult::Failed(e) => UpdateState::Failed(e),
+                    };
+                    *sc.lock().unwrap() = new_state;
+                });
+            });
+            Element::from(vstack((
+                Element::from(text_block(i18n.t("UpToDate"))),
+                Element::from(btn),
+            ))
+            .spacing(8.0))
+        }
+        UpdateState::Available {
+            version,
+            download_url,
+            release_notes,
+            file_size,
+        } => {
+            let size_str = crate::update::format_size(file_size);
+            let state_clone = Arc::clone(&update_state);
+            let url = download_url.clone();
+            let download_btn = button(i18n.t("DownloadUpdate"))
+                .accent()
+                .on_click(move || {
+                    *state_clone.lock().unwrap() = UpdateState::Downloading {
+                        downloaded: 0,
+                        total: file_size,
+                    };
+                    let sc = Arc::clone(&state_clone);
+                    let url2 = url.clone();
+                    std::thread::spawn(move || {
+                        let sc_inner = Arc::clone(&sc);
+                        let result = crate::update::download_installer(&url2, move |d, t| {
+                            let mut s = sc_inner.lock().unwrap();
+                            if let UpdateState::Downloading {
+                                ref mut downloaded,
+                                ref mut total,
+                            } = *s
+                            {
+                                *downloaded = d;
+                                if t > 0 {
+                                    *total = t;
+                                }
+                            }
+                        });
+                        let new_state = match result {
+                            Ok(path) => UpdateState::Ready(path),
+                            Err(e) => UpdateState::Failed(e.to_string()),
+                        };
+                        *sc.lock().unwrap() = new_state;
+                    });
+                });
+
+            let notes_el = if release_notes.is_empty() {
+                Element::from(text_block(""))
+            } else {
+                let notes = release_notes.lines().take(10).collect::<Vec<_>>().join("\n");
+                Element::from(text_block(notes).font_size(12.0).opacity(0.7))
+            };
+
+            Element::from(vstack((
+                Element::from(text_block(format!(
+                    "{}: {}",
+                    i18n.t("LatestVersion"),
+                    version
+                ))),
+                Element::from(
+                    text_block(format!("{}: {size_str}", i18n.t("UpdateAvailable")))
+                        .font_size(12.0),
+                ),
+                notes_el,
+                Element::from(download_btn),
+            ))
+            .spacing(8.0))
+        }
+        UpdateState::Downloading { downloaded, total } => {
+            let progress = if total > 0 {
+                (downloaded as f64 / total as f64) * 100.0
+            } else {
+                0.0
+            };
+            let downloaded_str = crate::update::format_size(downloaded);
+            let total_str = crate::update::format_size(total);
+            let progress_text = i18n
+                .t("DownloadProgress")
+                .replace("{downloaded}", &downloaded_str)
+                .replace("{total}", &total_str);
+
+            Element::from(vstack((
+                Element::from(ProgressBar::new(progress).range(0.0, 100.0)),
+                Element::from(text_block(progress_text).font_size(12.0)),
+            ))
+            .spacing(8.0))
+        }
+        UpdateState::Ready(path) => {
+            let install_btn = button(i18n.t("InstallAndRestart"))
+                .accent()
+                .on_click(move || {
+                    crate::update::launch_installer_and_quit(&path);
+                });
+            Element::from(vstack((
+                Element::from(text_block(i18n.t("UpdateReady"))),
+                Element::from(install_btn),
+            ))
+            .spacing(8.0))
+        }
+        UpdateState::Failed(err) => {
+            let state_clone = Arc::clone(&update_state);
+            let err_text = i18n.t("UpdateFailed").replace("{error}", &err);
+            let btn = button(i18n.t("CheckForUpdates")).on_click(move || {
+                *state_clone.lock().unwrap() = UpdateState::Checking;
+                let sc = Arc::clone(&state_clone);
+                std::thread::spawn(move || {
+                    let result = crate::update::check_for_updates();
+                    let new_state = match result {
+                        crate::update::UpdateCheckResult::UpToDate => UpdateState::UpToDate,
+                        crate::update::UpdateCheckResult::NewVersion {
+                            version,
+                            download_url,
+                            release_notes,
+                            file_size,
+                        } => UpdateState::Available {
+                            version,
+                            download_url,
+                            release_notes,
+                            file_size,
+                        },
+                        crate::update::UpdateCheckResult::Failed(e) => UpdateState::Failed(e),
+                    };
+                    *sc.lock().unwrap() = new_state;
+                });
+            });
+            Element::from(vstack((
+                Element::from(text_block(err_text).font_size(12.0)),
+                Element::from(btn),
+            ))
+            .spacing(8.0))
+        }
+    };
+
+    Element::from(
+        border(
+            vstack((Element::from(header), body))
+                .spacing(12.0),
+        )
+        .padding(Thickness::uniform(16.0))
+        .background(ThemeRef::LayerFill)
+        .corner_radius(8.0),
     )
 }

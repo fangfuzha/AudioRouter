@@ -28,6 +28,8 @@ pub struct General {
     pub backdrop: Backdrop,       // Window backdrop material
     #[serde(default = "default_true")]
     pub close_to_tray: bool,      // Whether closing the window minimizes to tray
+    #[serde(default = "default_true")]
+    pub auto_update_check: bool,  // Whether to automatically check for updates on startup
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -102,6 +104,7 @@ impl Default for Config {
                 nav_pane_expanded: true,
                 backdrop: Backdrop::default(),
                 close_to_tray: true,
+                auto_update_check: true,
             },
             source_device_id: String::new(),
             outputs: Vec::new(),
@@ -223,6 +226,7 @@ mod tests {
                 nav_pane_expanded: true,
                 backdrop: Backdrop::default(),
                 close_to_tray: true,
+                auto_update_check: true,
             },
             source_device_id: "src1".to_string(),
             outputs: vec![Output {

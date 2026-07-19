@@ -110,10 +110,7 @@ pub fn try_recv_menu_event() -> Option<TrayCommand> {
 }
 
 fn load_icon() -> anyhow::Result<Icon> {
-    let exe_path = std::env::current_exe()?;
-    let exe_dir = exe_path.parent().unwrap_or(std::path::Path::new("."));
-
-    let icon_path = exe_dir.join("assets").join("icon.png");
+    let icon_path = crate::resolve_asset_path("assets/icon.png");
 
     if icon_path.exists() {
         let image = image::open(&icon_path)?.into_rgba8();
