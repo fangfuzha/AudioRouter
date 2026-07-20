@@ -135,11 +135,18 @@ fn activate_existing_window() {
         return;
     }
 
-    // SW_RESTORE = 9：恢复最小化/最大化的窗口
+    // SW_RESTORE = 9：恢复最小化/最大化的窗口；SW_SHOW = 5：显示隐藏窗口
     const SW_RESTORE: i32 = 9;
+    const SW_SHOW: i32 = 5;
+    // 窗口被隐藏（close_to_tray → SW_HIDE）时 IsIconic 为 false，
+    // 因此需要额外检查 IsWindowVisible；不可见时先 ShowWindow。
     if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsIconic(hwnd) } != 0 {
         unsafe {
             windows_sys::Win32::UI::WindowsAndMessaging::ShowWindowAsync(hwnd, SW_RESTORE);
+        }
+    } else if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd) } == 0 {
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::ShowWindowAsync(hwnd, SW_SHOW);
         }
     }
     unsafe {
