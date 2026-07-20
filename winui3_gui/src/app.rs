@@ -218,6 +218,7 @@ impl Component for RootComponent {
                 // try_recv_tray_event 处理左键点击，try_recv_menu_event 处理菜单项点击。
                 let handle_command = |cmd: TrayCommand| match cmd {
                     TrayCommand::ToggleWindow => window_utils::toggle_window(),
+                    TrayCommand::ShowWindow => window_utils::show_and_focus_window(),
                     TrayCommand::Quit => std::process::exit(0),
                 };
                 while let Some(cmd) = crate::tray::try_recv_tray_event() {

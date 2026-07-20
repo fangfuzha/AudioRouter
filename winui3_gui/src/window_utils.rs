@@ -100,6 +100,15 @@ pub fn hide_window() {
     }
 }
 
+pub fn show_and_focus_window() {
+    if let Some(hwnd) = find_hwnd() {
+        unsafe {
+            ShowWindow(hwnd, SW_SHOW);
+            let _ = SetForegroundWindow(hwnd);
+        }
+    }
+}
+
 pub fn toggle_window() {
     if let Some(hwnd) = find_hwnd() {
         unsafe {

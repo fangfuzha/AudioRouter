@@ -20,6 +20,7 @@ thread_local! {
 #[allow(dead_code)]
 pub enum TrayCommand {
     ToggleWindow,
+    ShowWindow,
     Quit,
 }
 
@@ -79,7 +80,7 @@ pub fn try_recv_tray_event() -> Option<TrayCommand> {
             if button == tray_icon::MouseButton::Left
                 && button_state == tray_icon::MouseButtonState::Up
             {
-                return Some(TrayCommand::ToggleWindow);
+                return Some(TrayCommand::ShowWindow);
             }
         }
     }
