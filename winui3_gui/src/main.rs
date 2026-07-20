@@ -218,6 +218,14 @@ fn main() -> windows_reactor::Result<()> {
         c.init();
     }
 
+    // 初始化系统代理监听：读取当前代理并启动后台线程监听注册表变化，
+    // 用户在系统设置中切换 VPN 代理时自动热加载，无需重启应用。
+    update::init_proxy_watcher();
+
+    // 清理上次更新残留的安装包（%TEMP%\AudioRouter-Updates\*.exe），
+    // 避免多次更新后临时文件累积占用磁盘。
+    update::cleanup_old_installers();
+
     {
         let c = controller.lock().unwrap();
         let i18n = c.i18n.clone();

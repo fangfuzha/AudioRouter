@@ -3642,7 +3642,7 @@ dependencies = [
 
 [[package]]
 name = "winui3_gui"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "app_core",
