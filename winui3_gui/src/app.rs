@@ -61,8 +61,33 @@ fn detect_system_is_dark() -> bool {
     matches!(dark_light::detect(), Ok(dark_light::Mode::Dark))
 }
 
+fn open_url_in_browser(url: &str) {
+    use std::process::Command;
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("open").arg(url).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = Command::new("xdg-open").arg(url).spawn();
+    }
+}
+
 const NAV_TAG_HOME: &str = "home";
 const NAV_TAG_SETTINGS: &str = "settings";
+/// `NavViewItem.tag` 选中的内置 SettingsItem（框架固定字符串 "settings"）。
+/// 我们在 on_selection_changed 中通过排除法区分：
+/// - tag == NAV_TAG_HOME        → 切到首页
+/// - tag == NAV_TAG_GITHUB      → 打开仓库 URL（不导航）
+/// - 其它（"settings" 或空串） → 切到设置页
+const NAV_TAG_GITHUB: &str = "github";
+const GITHUB_REPO_URL: &str = "https://github.com/fangfuzha/AudioRouter";
 
 pub struct RootComponent {
     controller: Arc<Mutex<AppController>>,
@@ -256,9 +281,19 @@ fn main_app(
         }
     };
 
-    let nav_items = [NavViewItem::new(i18n.t("AppTitle"))
-        .tag(NAV_TAG_HOME)
-        .icon(Symbol::Home)];
+    // nav_items:首页 + 仓库链接。
+    // 注:NavViewItem.icon 接受 IconElement,而 windows-reactor 的 bindings
+    // 没有 BitmapIcon/FontIcon/PathIcon(只有 SymbolIcon)。所以这里用
+    // Symbol::Globe 作为仓库图标(代表"打开外部链接");GitHub 官方 PNG
+    // 走的是 pane_footer 之外的方案,需要时再扩展 IconElement 支持。
+    let nav_items = [
+        NavViewItem::new(i18n.t("AppTitle"))
+            .tag(NAV_TAG_HOME)
+            .icon(Symbol::Home),
+        NavViewItem::new(i18n.t("GitHub"))
+            .tag(NAV_TAG_GITHUB)
+            .icon(Symbol::Globe),
+    ];
 
     let body: Element = if nav_selected == NAV_TAG_SETTINGS {
         settings_page(
@@ -290,7 +325,13 @@ fn main_app(
     let _ = set_nav_expanded;
 
     // 内置 SettingsItem 点击时 Tag 为 null，提取链返回空字符串。
-    // 用排除法：只有明确是 NAV_TAG_HOME 才导航首页，否则都当作 settings。
+    // 用排除法：tag == NAV_TAG_HOME → 首页；tag == NAV_TAG_GITHUB → 打开
+    // 仓库 URL 后回弹选中项；其它（含 "settings" 与空串）→ 设置页。
+    // GitHub 按钮在 nav_items 中(在 settings 上方),点击后浏览器打开仓库,
+    // 然后把 selected_tag 回弹到 home（避免侧栏停留在这个临时态上）。
+    let nav_selected_for_handler = nav_selected.clone();
+    let set_nav_selected_for_handler = set_nav_selected.clone();
+    let controller_for_handler = Arc::clone(&controller);
     Element::from(
         NavigationView::new(nav_items, body)
             .selected_tag(&nav_selected)
@@ -298,13 +339,17 @@ fn main_app(
             .on_selection_changed(move |tag: String| {
                 log::info!("NavigationView selection changed, tag={:?}", tag);
                 if tag == NAV_TAG_HOME {
-                    let mut c = controller.lock().unwrap();
+                    let mut c = controller_for_handler.lock().unwrap();
                     c.begin_settings_edit();
-                    set_nav_selected.call(NAV_TAG_HOME.to_string());
+                    set_nav_selected_for_handler.call(NAV_TAG_HOME.to_string());
+                } else if tag == NAV_TAG_GITHUB {
+                    open_url_in_browser(GITHUB_REPO_URL);
+                    // 点击 GitHub 项不真正切换页面，弹回之前选中的项
+                    set_nav_selected_for_handler.call(nav_selected_for_handler.clone());
                 } else {
-                    let mut c = controller.lock().unwrap();
+                    let mut c = controller_for_handler.lock().unwrap();
                     c.begin_settings_edit();
-                    set_nav_selected.call(NAV_TAG_SETTINGS.to_string());
+                    set_nav_selected_for_handler.call(NAV_TAG_SETTINGS.to_string());
                 }
             })
             .settings_visible(true)

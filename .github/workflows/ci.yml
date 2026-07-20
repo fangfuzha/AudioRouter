@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 3
+  RUSTUP_MAX_RETRY: 3
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+
 jobs:
   rust:
     runs-on: windows-latest
@@ -16,6 +23,16 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+          shared-key: "ci-windows"
+          cache-all-crates: true
 
       - name: Check formatting
         run: cargo fmt --check

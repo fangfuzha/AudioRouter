@@ -6,6 +6,7 @@
 //! - 安装：下载到临时目录后启动安装包并退出当前进程
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use semver::Version;
 
@@ -13,6 +14,14 @@ const GITHUB_OWNER: &str = "fangfuzha";
 const GITHUB_REPO: &str = "AudioRouter";
 const USER_AGENT: &str = "AudioRouter-Updater";
 const INSTALLER_PATTERN: &str = "AudioRouter-Setup-";
+
+fn build_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .tls_connector(Arc::new(
+            ureq::native_tls::TlsConnector::new().expect("failed to create native-tls connector"),
+        ))
+        .build()
+}
 
 /// GitHub release API 返回的简化结构
 #[derive(Debug, serde::Deserialize)]
@@ -61,7 +70,10 @@ pub fn check_for_updates() -> UpdateCheckResult {
         GITHUB_OWNER, GITHUB_REPO
     );
 
-    let release: GithubRelease = match ureq::get(&url)
+    let agent = build_agent();
+
+    let release: GithubRelease = match agent
+        .get(&url)
         .set("User-Agent", USER_AGENT)
         .set("Accept", "application/vnd.github.v3+json")
         .call()
@@ -127,7 +139,9 @@ pub fn check_for_updates() -> UpdateCheckResult {
 ///
 /// 阻塞调用，应在后台线程中执行。
 pub fn download_installer(download_url: &str, progress: impl Fn(u64, u64)) -> anyhow::Result<PathBuf> {
-    let resp = ureq::get(download_url)
+    let agent = build_agent();
+    let resp = agent
+        .get(download_url)
         .set("User-Agent", USER_AGENT)
         .call()
         .map_err(|e| anyhow::anyhow!("download failed: {e}"))?;

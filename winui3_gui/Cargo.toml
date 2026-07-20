@@ -8,7 +8,7 @@ rust-version = "1.95"
 app_core = { path = "../app_core" }
 audio_core = { path = "../audio_core" }
 config = { path = "../config" }
-ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+ureq = { version = "2", default-features = false, features = ["json", "native-tls", "charset"] }
 serde = { version = "1", features = ["derive"] }
 semver = { version = "1", features = ["serde"] }
 windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "f0a52dd530fce4fbcee7e9d8594df019e4302ea2" }

@@ -41,6 +41,9 @@ jobs:
       CARGO_INCREMENTAL: 0
       CARGO_NET_RETRY: 3
       RUSTUP_MAX_RETRY: 3
+      # sccache 配置：使用 GitHub Actions 缓存作为后端
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
       # signtool 在签名步骤中复用，避免重复扫描 Windows Kits 目录
       SIGNTOOL_PATH: ""
 
@@ -82,6 +85,11 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # 安装 sccache 并配置为 rustc 包装器，利用 GitHub Actions 缓存后端
+      # 比单纯的 target 目录缓存更高效，支持跨工作流、跨分支复用
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
       # 使用专业的 Rust 缓存 action：
       # 自动处理 ~/.cargo/{registry,git,bin} 和 target 目录，
       # 根据 Cargo.lock / 工具链 / 操作系统自动生成 key，
@@ -91,6 +99,10 @@ jobs:
         with:
           workspaces: "."
           shared-key: "release-windows"
+          # 缓存 cargo 安装的二进制工具
+          cache-all-crates: true
+          # 保存即使构建失败（方便调试）
+          save-if: "true"
 
       # 缓存 Inno Setup 安装目录，避免每次 choco install（约省 30-60s）
       - name: Cache Inno Setup

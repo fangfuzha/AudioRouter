@@ -72,4 +72,5 @@ pub const ZH_MAP: &[(&str, &str)] = &[
     ("UpToDate", "当前已是最新版本"),
     ("AutoUpdateCheck", "启动时自动检查更新"),
     ("ReleaseNotes", "更新说明"),
+    ("GitHub", "GitHub 仓库"),
 ];

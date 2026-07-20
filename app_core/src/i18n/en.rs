@@ -72,4 +72,5 @@ pub const EN_MAP: &[(&str, &str)] = &[
     ("UpToDate", "You're up to date"),
     ("AutoUpdateCheck", "Automatically check for updates on startup"),
     ("ReleaseNotes", "Release Notes"),
+    ("GitHub", "GitHub Repository"),
 ];
