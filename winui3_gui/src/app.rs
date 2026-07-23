@@ -283,17 +283,21 @@ fn main_app(
     };
 
     // nav_items:首页 + 仓库链接。
-    // 注:NavViewItem.icon 接受 IconElement,而 windows-reactor 的 bindings
-    // 没有 BitmapIcon/FontIcon/PathIcon(只有 SymbolIcon)。所以这里用
-    // Symbol::Globe 作为仓库图标(代表"打开外部链接");GitHub 官方 PNG
-    // 走的是 pane_footer 之外的方案,需要时再扩展 IconElement 支持。
+    // GitHub 项使用 BitmapIcon 加载本地 assets/github.png（PR #4736 支持），
+    // 避免 https URL 的网络依赖。将 Windows 路径转为 file:/// URI。
+    let github_icon_uri = {
+        let path = crate::resolve_asset_path("assets/github.png");
+        let path_str = path.to_string_lossy().replace('\\', "/");
+        format!("file:///{path_str}")
+    };
+
     let nav_items = [
         NavViewItem::new(i18n.t("AppTitle"))
             .tag(NAV_TAG_HOME)
             .icon(Symbol::Home),
         NavViewItem::new(i18n.t("GitHub"))
             .tag(NAV_TAG_GITHUB)
-            .icon(Symbol::Globe),
+            .icon(Icon::bitmap(github_icon_uri)),
     ];
 
     let body: Element = if nav_selected == NAV_TAG_SETTINGS {
@@ -314,8 +318,7 @@ fn main_app(
         )
     };
 
-    // 使用 LeftCompact 模式：始终显示图标条，不会因窗口变窄而完全隐藏侧栏
-    // （Auto 模式在窗口过小时会切换到 Minimal，导致汉堡按钮悬浮在内容上）
+    // 使用 Left 模式：展开时内联推开内容（非浮动覆盖），收起时变为窄图标条。
     //
     // 关键：windows-reactor 的 diff 机制在属性值不变时跳过 setter 调用
     // （见 reconciler/diff_helpers.rs 的 diff_props 实现）。
@@ -355,7 +358,7 @@ fn main_app(
             })
             .settings_visible(true)
             .pane_title("AudioRouter")
-            .pane_display_mode(NavigationViewPaneDisplayMode::LeftCompact)
+            .pane_display_mode(NavigationViewPaneDisplayMode::Left)
             .pane_open(pane_open)
             .open_pane_length(240.0),
     )
