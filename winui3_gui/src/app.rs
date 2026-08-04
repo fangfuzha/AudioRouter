@@ -283,10 +283,19 @@ fn main_app(
     };
 
     // nav_items:首页 + 仓库链接。
-    // GitHub 项使用 BitmapIcon 加载本地 assets/github.png（PR #4736 支持），
-    // 避免 https URL 的网络依赖。将 Windows 路径转为 file:/// URI。
+    // GitHub 项使用 SVG 图标（ImageIcon + SvgImageSource），根据当前主题
+    // 选择浅色（黑色图标）或深色（白色图标）版本，确保在任意主题背景下可见。
+    let is_dark = match theme_choice {
+        ThemeChoice::Dark => true,
+        ThemeChoice::Light | ThemeChoice::FollowSystem => detect_system_is_dark(),
+    };
+    let svg_name = if is_dark {
+        "assets/github-dark.svg"
+    } else {
+        "assets/github-light.svg"
+    };
     let github_icon_uri = {
-        let path = crate::resolve_asset_path("assets/github.png");
+        let path = crate::resolve_asset_path(svg_name);
         let path_str = path.to_string_lossy().replace('\\', "/");
         format!("file:///{path_str}")
     };
