@@ -133,9 +133,7 @@ where
                             break;
                         }
                         Err(restart_err) => {
-                            log::warn!(
-                                "Restart attempt {attempt} failed: {restart_err:?}"
-                            );
+                            log::warn!("Restart attempt {attempt} failed: {restart_err:?}");
                         }
                     }
                 }

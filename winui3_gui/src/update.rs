@@ -54,9 +54,8 @@ fn watch_proxy_registry() {
     let subkey = to_wide("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings");
 
     let mut hkey: windows_sys::Win32::System::Registry::HKEY = std::ptr::null_mut();
-    let status = unsafe {
-        RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_NOTIFY, &mut hkey)
-    };
+    let status =
+        unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_NOTIFY, &mut hkey) };
     if status != 0 {
         log::warn!("Failed to open registry key for proxy notification: {status}");
         return;
@@ -68,13 +67,7 @@ fn watch_proxy_registry() {
         // 阻塞等待注册表值变化（最后一个参数 0 = 同步阻塞）
         // windows-sys 中 BOOL 是 i32 类型，0 = FALSE，非零 = TRUE
         let status = unsafe {
-            RegNotifyChangeKeyValue(
-                hkey,
-                0,
-                REG_NOTIFY_CHANGE_LAST_SET,
-                std::ptr::null_mut(),
-                0,
-            )
+            RegNotifyChangeKeyValue(hkey, 0, REG_NOTIFY_CHANGE_LAST_SET, std::ptr::null_mut(), 0)
         };
 
         if status != 0 {
@@ -150,9 +143,8 @@ fn read_system_proxy() -> Option<String> {
     let proxy_server_name = to_wide("ProxyServer");
 
     let mut hkey: windows_sys::Win32::System::Registry::HKEY = std::ptr::null_mut();
-    let status = unsafe {
-        RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut hkey)
-    };
+    let status =
+        unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut hkey) };
     if status != 0 {
         return None;
     }
@@ -210,8 +202,7 @@ fn read_system_proxy() -> Option<String> {
     let proxy_addr = if proxy_str.contains('=') {
         proxy_str.split(';').find_map(|s| {
             let s = s.trim();
-            s.strip_prefix("https=")
-                .or_else(|| s.strip_prefix("http="))
+            s.strip_prefix("https=").or_else(|| s.strip_prefix("http="))
         })
     } else {
         Some(proxy_str)
@@ -287,10 +278,7 @@ pub fn check_for_updates() -> UpdateCheckResult {
             Err(e) => return UpdateCheckResult::Failed(format!("parse response: {e}")),
         },
         Err(ureq::Error::Status(code, resp)) => {
-            return UpdateCheckResult::Failed(format!(
-                "HTTP {code}: {}",
-                resp.status_text()
-            ));
+            return UpdateCheckResult::Failed(format!("HTTP {code}: {}", resp.status_text()));
         }
         Err(e) => return UpdateCheckResult::Failed(format!("network error: {e}")),
     };
@@ -300,7 +288,10 @@ pub fn check_for_updates() -> UpdateCheckResult {
     }
 
     // 从 tag 中提取版本号（去掉前缀 v/V）
-    let tag = release.tag_name.trim_start_matches('v').trim_start_matches('V');
+    let tag = release
+        .tag_name
+        .trim_start_matches('v')
+        .trim_start_matches('V');
     let latest = match Version::parse(tag) {
         Ok(v) => v,
         Err(e) => return UpdateCheckResult::Failed(format!("invalid version tag '{tag}': {e}")),
@@ -308,10 +299,12 @@ pub fn check_for_updates() -> UpdateCheckResult {
 
     let current = match Version::parse(current_version()) {
         Ok(v) => v,
-        Err(_) => return UpdateCheckResult::Failed(format!(
-            "current version '{}' is not valid semver",
-            current_version()
-        )),
+        Err(_) => {
+            return UpdateCheckResult::Failed(format!(
+                "current version '{}' is not valid semver",
+                current_version()
+            ))
+        }
     };
 
     if latest <= current {
@@ -319,16 +312,18 @@ pub fn check_for_updates() -> UpdateCheckResult {
     }
 
     // 找到匹配的安装包 asset
-    let installer = release.assets.iter().find(|a| {
-        a.name.starts_with(INSTALLER_PATTERN)
-            && a.name.ends_with("-x64.exe")
-    });
+    let installer = release
+        .assets
+        .iter()
+        .find(|a| a.name.starts_with(INSTALLER_PATTERN) && a.name.ends_with("-x64.exe"));
 
     let installer = match installer {
         Some(a) => a,
-        None => return UpdateCheckResult::Failed(
-            "no installer asset found in latest release".to_string(),
-        ),
+        None => {
+            return UpdateCheckResult::Failed(
+                "no installer asset found in latest release".to_string(),
+            )
+        }
     };
 
     UpdateCheckResult::NewVersion {
@@ -342,7 +337,10 @@ pub fn check_for_updates() -> UpdateCheckResult {
 /// 下载安装包到临时目录，返回本地文件路径。
 ///
 /// 阻塞调用，应在后台线程中执行。
-pub fn download_installer(download_url: &str, progress: impl Fn(u64, u64)) -> anyhow::Result<PathBuf> {
+pub fn download_installer(
+    download_url: &str,
+    progress: impl Fn(u64, u64),
+) -> anyhow::Result<PathBuf> {
     let agent = build_agent();
     let resp = agent
         .get(download_url)

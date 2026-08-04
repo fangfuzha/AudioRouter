@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use app_core::i18n::I18n;
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
-    TrayIcon, TrayIconBuilder, TrayIconEvent, Icon,
+    Icon, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
 
 /// 托盘运行时状态，保存在 thread_local 中以便运行时更新菜单文本。
@@ -76,7 +76,12 @@ pub fn update_tray_language(i18n: &I18n) {
 /// 尝试接收托盘图标点击事件。
 pub fn try_recv_tray_event() -> Option<TrayCommand> {
     while let Ok(event) = TrayIconEvent::receiver().try_recv() {
-        if let TrayIconEvent::Click { button, button_state, .. } = event {
+        if let TrayIconEvent::Click {
+            button,
+            button_state,
+            ..
+        } = event
+        {
             if button == tray_icon::MouseButton::Left
                 && button_state == tray_icon::MouseButtonState::Up
             {
@@ -125,7 +130,7 @@ fn load_icon() -> anyhow::Result<Icon> {
     for y in 0..size {
         for x in 0..size {
             let idx = ((y * size + x) * 4) as usize;
-            rgba[idx] = 0x00;     // R
+            rgba[idx] = 0x00; // R
             rgba[idx + 1] = 0x78; // G
             rgba[idx + 2] = 0xD4; // B
             rgba[idx + 3] = 0xFF; // A

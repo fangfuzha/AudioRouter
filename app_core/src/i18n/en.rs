@@ -29,13 +29,31 @@ pub const EN_MAP: &[(&str, &str)] = &[
     ("channelModes.Swap", "Swap L/R"),
     ("channelModes.LeftOnly", "Left Only"),
     ("channelModes.RightOnly", "Right Only"),
-    ("channelModeDesc.Stereo", "Keep original left and right channels unchanged"),
-    ("channelModeDesc.LeftMono", "Copy left channel to both left and right outputs"),
-    ("channelModeDesc.RightMono", "Copy right channel to both left and right outputs"),
-    ("channelModeDesc.Mono", "Mix left and right channels to mono and output to both"),
+    (
+        "channelModeDesc.Stereo",
+        "Keep original left and right channels unchanged",
+    ),
+    (
+        "channelModeDesc.LeftMono",
+        "Copy left channel to both left and right outputs",
+    ),
+    (
+        "channelModeDesc.RightMono",
+        "Copy right channel to both left and right outputs",
+    ),
+    (
+        "channelModeDesc.Mono",
+        "Mix left and right channels to mono and output to both",
+    ),
     ("channelModeDesc.Swap", "Swap left and right channels"),
-    ("channelModeDesc.LeftOnly", "Output only the left channel, mute the right"),
-    ("channelModeDesc.RightOnly", "Output only the right channel, mute the left"),
+    (
+        "channelModeDesc.LeftOnly",
+        "Output only the left channel, mute the right",
+    ),
+    (
+        "channelModeDesc.RightOnly",
+        "Output only the right channel, mute the left",
+    ),
     ("UpdateAvailable", "New version available!"),
     ("UpdateAvailableVersion", "New version {v} available!"),
     ("UpdateCheckFailed", "Update check failed: {e}"),
@@ -70,7 +88,10 @@ pub const EN_MAP: &[(&str, &str)] = &[
     ("InstallAndRestart", "Install and Restart"),
     ("UpdateFailed", "Update failed: {error}"),
     ("UpToDate", "You're up to date"),
-    ("AutoUpdateCheck", "Automatically check for updates on startup"),
+    (
+        "AutoUpdateCheck",
+        "Automatically check for updates on startup",
+    ),
     ("ReleaseNotes", "Release Notes"),
     ("GitHub", "GitHub Repository"),
 ];

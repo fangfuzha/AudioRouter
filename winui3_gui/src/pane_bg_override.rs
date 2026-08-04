@@ -20,11 +20,7 @@ extern "system" {
         iid: *const GUID,
         factory: *mut *mut c_void,
     ) -> HRESULT;
-    fn WindowsCreateString(
-        source: *const u16,
-        length: u32,
-        string: *mut *mut u16,
-    ) -> HRESULT;
+    fn WindowsCreateString(source: *const u16, length: u32, string: *mut *mut u16) -> HRESULT;
     fn WindowsDeleteString(string: *mut u16) -> HRESULT;
 }
 
@@ -93,7 +89,10 @@ fn do_install() -> windows_core::Result<()> {
 }
 
 /// 通过 `RoGetActivationFactory` 获取指定 WinRT 类的静态工厂接口。
-unsafe fn get_activation_factory(iid: &GUID, class_name: &str) -> windows_core::Result<*mut c_void> {
+unsafe fn get_activation_factory(
+    iid: &GUID,
+    class_name: &str,
+) -> windows_core::Result<*mut c_void> {
     let hs = create_hstring(class_name)?;
     let mut factory: *mut c_void = null_mut();
     let hr = RoGetActivationFactory(hs, iid, &mut factory);
@@ -110,7 +109,10 @@ unsafe fn get_activation_factory(iid: &GUID, class_name: &str) -> windows_core::
 /// `XamlReader.Load(xaml)` → 返回 IInspectable* (ResourceDictionary)。
 /// IXamlReaderStatics Vtable: IInspectable(6) + Load(6)。
 unsafe fn load_xaml(xaml: &str) -> windows_core::Result<*mut c_void> {
-    let factory = get_activation_factory(&IID_IXAML_READER_STATICS, "Microsoft.UI.Xaml.Markup.XamlReader")?;
+    let factory = get_activation_factory(
+        &IID_IXAML_READER_STATICS,
+        "Microsoft.UI.Xaml.Markup.XamlReader",
+    )?;
 
     let vtable = *(factory as *const *const usize);
     type LoadFn = unsafe extern "system" fn(*mut c_void, *mut u16, *mut *mut c_void) -> HRESULT;
@@ -134,7 +136,8 @@ unsafe fn load_xaml(xaml: &str) -> windows_core::Result<*mut c_void> {
 /// IApplicationStatics Vtable: IInspectable(6) + get_Current(6)。
 /// IApplication Vtable: IInspectable(6) + get_Resources(6)。
 unsafe fn get_application_resources() -> windows_core::Result<*mut c_void> {
-    let statics = get_activation_factory(&IID_IAPPLICATION_STATICS, "Microsoft.UI.Xaml.Application")?;
+    let statics =
+        get_activation_factory(&IID_IAPPLICATION_STATICS, "Microsoft.UI.Xaml.Application")?;
 
     // IApplicationStatics::get_Current(this, *mut IInspectable) -> HRESULT
     let statics_vtable = *(statics as *const *const usize);

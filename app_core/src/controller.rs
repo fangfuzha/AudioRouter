@@ -108,10 +108,7 @@ impl AppController {
                 }
                 WorkerEvent::Failed(msg) => {
                     self.is_running = false;
-                    self.status_text = self
-                        .i18n
-                        .t("RoutingFailed")
-                        .replace("{error}", &msg);
+                    self.status_text = self.i18n.t("RoutingFailed").replace("{error}", &msg);
                     log::error!("Router failed: {msg}");
                 }
             }
@@ -207,7 +204,11 @@ impl AppController {
     }
 
     pub fn nav_pane_expanded(&self) -> bool {
-        self.config_manager.handle().read().general.nav_pane_expanded
+        self.config_manager
+            .handle()
+            .read()
+            .general
+            .nav_pane_expanded
     }
 
     pub fn set_nav_pane_expanded(&mut self, expanded: bool) {

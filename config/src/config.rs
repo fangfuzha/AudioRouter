@@ -23,13 +23,13 @@ pub struct General {
     pub start_with_windows: bool, // Whether to launch app at system startup
     pub auto_route: bool,         // Whether to auto-start routing on app launch
     #[serde(default = "default_true")]
-    pub nav_pane_expanded: bool,  // Whether the navigation pane is expanded
+    pub nav_pane_expanded: bool, // Whether the navigation pane is expanded
     #[serde(default)]
-    pub backdrop: Backdrop,       // Window backdrop material
+    pub backdrop: Backdrop, // Window backdrop material
     #[serde(default = "default_true")]
-    pub close_to_tray: bool,      // Whether closing the window minimizes to tray
+    pub close_to_tray: bool, // Whether closing the window minimizes to tray
     #[serde(default = "default_true")]
-    pub auto_update_check: bool,  // Whether to automatically check for updates on startup
+    pub auto_update_check: bool, // Whether to automatically check for updates on startup
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Type)]

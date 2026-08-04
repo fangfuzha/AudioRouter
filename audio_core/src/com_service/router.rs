@@ -123,10 +123,7 @@ pub fn setup_router_clients(cfg: &RouterConfig) -> Result<RouterSetupResult> {
                 ),
             },
             Err(e) => {
-                log::warn!(
-                    "Failed to resolve output device {}: {e}",
-                    target.device_id
-                );
+                log::warn!("Failed to resolve output device {}: {e}", target.device_id);
             }
         }
     }
@@ -143,8 +140,8 @@ pub fn setup_router_clients(cfg: &RouterConfig) -> Result<RouterSetupResult> {
 }
 
 pub fn get_mix_format(client: &IAudioClient) -> Result<MixFormat> {
-    let pwf =
-        unsafe { client.GetMixFormat() }.map_err(|e| anyhow!("GetMixFormat failed: {}", err_code(&e)))?;
+    let pwf = unsafe { client.GetMixFormat() }
+        .map_err(|e| anyhow!("GetMixFormat failed: {}", err_code(&e)))?;
     MixFormat::new(pwf)
 }
 
@@ -166,7 +163,12 @@ fn initialize_capture_client_internal(
                 pwf,
                 None,
             )
-            .map_err(|e| anyhow!("IAudioClient::Initialize (capture) failed: {}", err_code(&e)))?;
+            .map_err(|e| {
+                anyhow!(
+                    "IAudioClient::Initialize (capture) failed: {}",
+                    err_code(&e)
+                )
+            })?;
 
         client.GetService::<IAudioCaptureClient>().map_err(|e| {
             anyhow!(

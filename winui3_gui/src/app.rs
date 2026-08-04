@@ -65,9 +65,7 @@ fn open_url_in_browser(url: &str) {
     use std::process::Command;
     #[cfg(target_os = "windows")]
     {
-        let _ = Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn();
+        let _ = Command::new("cmd").args(["/C", "start", "", url]).spawn();
     }
     #[cfg(target_os = "macos")]
     {
@@ -176,7 +174,10 @@ impl Component for RootComponent {
                 let result = crate::update::check_for_updates();
                 let new_state = match result {
                     crate::update::UpdateCheckResult::UpToDate => {
-                        log::info!("Update check: already up to date (v{})", crate::update::current_version());
+                        log::info!(
+                            "Update check: already up to date (v{})",
+                            crate::update::current_version()
+                        );
                         UpdateState::UpToDate
                     }
                     crate::update::UpdateCheckResult::NewVersion {
@@ -320,11 +321,7 @@ fn main_app(
             Arc::clone(&update_state),
         )
     } else {
-        home_page(
-            Arc::clone(&controller),
-            i18n.clone(),
-            make_setter.clone(),
-        )
+        home_page(Arc::clone(&controller), i18n.clone(), make_setter.clone())
     };
 
     // 使用 Left 模式：展开时内联推开内容（非浮动覆盖），收起时变为窄图标条。
@@ -409,8 +406,10 @@ fn home_page(
     ];
 
     // 源设备下拉列表
-    let source_device_names: Vec<String> =
-        source_devices.iter().map(|d| d.friendly_name.clone()).collect();
+    let source_device_names: Vec<String> = source_devices
+        .iter()
+        .map(|d| d.friendly_name.clone())
+        .collect();
     let selected_source_index = source_devices
         .iter()
         .position(|d| Some(&d.id) == selected_source_id.as_ref())
@@ -508,21 +507,17 @@ fn home_page(
     let toggle_controller = Arc::clone(&controller);
     let toggle_refresh = make_setter.clone();
     let toggle_btn = if is_running {
-        button(i18n.t("Stop"))
-            .accent()
-            .on_click(move || {
-                let mut c = toggle_controller.lock().unwrap();
-                c.stop_routing();
-                toggle_refresh();
-            })
+        button(i18n.t("Stop")).accent().on_click(move || {
+            let mut c = toggle_controller.lock().unwrap();
+            c.stop_routing();
+            toggle_refresh();
+        })
     } else {
-        button(i18n.t("Start"))
-            .accent()
-            .on_click(move || {
-                let mut c = toggle_controller.lock().unwrap();
-                c.start_routing();
-                toggle_refresh();
-            })
+        button(i18n.t("Start")).accent().on_click(move || {
+            let mut c = toggle_controller.lock().unwrap();
+            c.start_routing();
+            toggle_refresh();
+        })
     };
 
     Element::from(
@@ -555,7 +550,12 @@ fn home_page(
             ),
         ))
         .spacing(8.0)
-        .padding(Thickness { left: 16.0, top: 12.0, right: 16.0, bottom: 16.0 }),
+        .padding(Thickness {
+            left: 16.0,
+            top: 12.0,
+            right: 16.0,
+            bottom: 16.0,
+        }),
     )
 }
 
@@ -568,7 +568,16 @@ fn settings_page(
     set_theme_choice: SetState<ThemeChoice>,
     update_state: Arc<Mutex<UpdateState>>,
 ) -> Element {
-    let (start_with_windows, start_minimized, auto_route, close_to_tray, auto_update_check, lang_index, theme_index, backdrop_index) = {
+    let (
+        start_with_windows,
+        start_minimized,
+        auto_route,
+        close_to_tray,
+        auto_update_check,
+        lang_index,
+        theme_index,
+        backdrop_index,
+    ) = {
         let c = controller.lock().unwrap();
         let draft = &c.draft_general;
         let lang_idx = match draft.language.as_str() {
@@ -751,9 +760,15 @@ fn settings_page(
                                                 // 实时应用 backdrop 以便预览效果
                                                 use windows_reactor::Backdrop as WrBackdrop;
                                                 let wr_bd = match bd {
-                                                    config::config::Backdrop::Mica => WrBackdrop::Mica,
-                                                    config::config::Backdrop::MicaAlt => WrBackdrop::MicaAlt,
-                                                    config::config::Backdrop::Acrylic => WrBackdrop::Acrylic,
+                                                    config::config::Backdrop::Mica => {
+                                                        WrBackdrop::Mica
+                                                    }
+                                                    config::config::Backdrop::MicaAlt => {
+                                                        WrBackdrop::MicaAlt
+                                                    }
+                                                    config::config::Backdrop::Acrylic => {
+                                                        WrBackdrop::Acrylic
+                                                    }
                                                 };
                                                 windows_reactor::set_backdrop(Some(wr_bd));
                                             }
@@ -780,7 +795,12 @@ fn settings_page(
             ),
         ))
         .spacing(12.0)
-        .padding(Thickness { left: 16.0, top: 12.0, right: 16.0, bottom: 16.0 }),
+        .padding(Thickness {
+            left: 16.0,
+            top: 12.0,
+            right: 16.0,
+            bottom: 16.0,
+        }),
     )
 }
 
@@ -829,13 +849,13 @@ fn build_update_section(
             });
             Element::from(btn)
         }
-        UpdateState::Checking => {
-            Element::from(vstack((
+        UpdateState::Checking => Element::from(
+            vstack((
                 Element::from(ProgressBar::indeterminate()),
                 Element::from(text_block(i18n.t("CheckingForUpdates")).font_size(12.0)),
             ))
-            .spacing(8.0))
-        }
+            .spacing(8.0),
+        ),
         UpdateState::UpToDate => {
             let state_clone = Arc::clone(&update_state);
             let btn = button(i18n.t("CheckForUpdates")).on_click(move || {
@@ -861,11 +881,13 @@ fn build_update_section(
                     *sc.lock().unwrap() = new_state;
                 });
             });
-            Element::from(vstack((
-                Element::from(text_block(i18n.t("UpToDate"))),
-                Element::from(btn),
-            ))
-            .spacing(8.0))
+            Element::from(
+                vstack((
+                    Element::from(text_block(i18n.t("UpToDate"))),
+                    Element::from(btn),
+                ))
+                .spacing(8.0),
+            )
         }
         UpdateState::Available {
             version,
@@ -876,59 +898,63 @@ fn build_update_section(
             let size_str = crate::update::format_size(file_size);
             let state_clone = Arc::clone(&update_state);
             let url = download_url.clone();
-            let download_btn = button(i18n.t("DownloadUpdate"))
-                .accent()
-                .on_click(move || {
-                    *state_clone.lock().unwrap() = UpdateState::Downloading {
-                        downloaded: 0,
-                        total: file_size,
-                    };
-                    let sc = Arc::clone(&state_clone);
-                    let url2 = url.clone();
-                    std::thread::spawn(move || {
-                        let sc_inner = Arc::clone(&sc);
-                        let result = crate::update::download_installer(&url2, move |d, t| {
-                            let mut s = sc_inner.lock().unwrap();
-                            if let UpdateState::Downloading {
-                                ref mut downloaded,
-                                ref mut total,
-                            } = *s
-                            {
-                                *downloaded = d;
-                                if t > 0 {
-                                    *total = t;
-                                }
+            let download_btn = button(i18n.t("DownloadUpdate")).accent().on_click(move || {
+                *state_clone.lock().unwrap() = UpdateState::Downloading {
+                    downloaded: 0,
+                    total: file_size,
+                };
+                let sc = Arc::clone(&state_clone);
+                let url2 = url.clone();
+                std::thread::spawn(move || {
+                    let sc_inner = Arc::clone(&sc);
+                    let result = crate::update::download_installer(&url2, move |d, t| {
+                        let mut s = sc_inner.lock().unwrap();
+                        if let UpdateState::Downloading {
+                            ref mut downloaded,
+                            ref mut total,
+                        } = *s
+                        {
+                            *downloaded = d;
+                            if t > 0 {
+                                *total = t;
                             }
-                        });
-                        let new_state = match result {
-                            Ok(path) => UpdateState::Ready(path),
-                            Err(e) => UpdateState::Failed(e.to_string()),
-                        };
-                        *sc.lock().unwrap() = new_state;
+                        }
                     });
+                    let new_state = match result {
+                        Ok(path) => UpdateState::Ready(path),
+                        Err(e) => UpdateState::Failed(e.to_string()),
+                    };
+                    *sc.lock().unwrap() = new_state;
                 });
+            });
 
             let notes_el = if release_notes.is_empty() {
                 Element::from(text_block(""))
             } else {
-                let notes = release_notes.lines().take(10).collect::<Vec<_>>().join("\n");
+                let notes = release_notes
+                    .lines()
+                    .take(10)
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 Element::from(text_block(notes).font_size(12.0).opacity(0.7))
             };
 
-            Element::from(vstack((
-                Element::from(text_block(format!(
-                    "{}: {}",
-                    i18n.t("LatestVersion"),
-                    version
-                ))),
-                Element::from(
-                    text_block(format!("{}: {size_str}", i18n.t("UpdateAvailable")))
-                        .font_size(12.0),
-                ),
-                notes_el,
-                Element::from(download_btn),
-            ))
-            .spacing(8.0))
+            Element::from(
+                vstack((
+                    Element::from(text_block(format!(
+                        "{}: {}",
+                        i18n.t("LatestVersion"),
+                        version
+                    ))),
+                    Element::from(
+                        text_block(format!("{}: {size_str}", i18n.t("UpdateAvailable")))
+                            .font_size(12.0),
+                    ),
+                    notes_el,
+                    Element::from(download_btn),
+                ))
+                .spacing(8.0),
+            )
         }
         UpdateState::Downloading { downloaded, total } => {
             let progress = if total > 0 {
@@ -943,11 +969,13 @@ fn build_update_section(
                 .replace("{downloaded}", &downloaded_str)
                 .replace("{total}", &total_str);
 
-            Element::from(vstack((
-                Element::from(ProgressBar::new(progress).range(0.0, 100.0)),
-                Element::from(text_block(progress_text).font_size(12.0)),
-            ))
-            .spacing(8.0))
+            Element::from(
+                vstack((
+                    Element::from(ProgressBar::new(progress).range(0.0, 100.0)),
+                    Element::from(text_block(progress_text).font_size(12.0)),
+                ))
+                .spacing(8.0),
+            )
         }
         UpdateState::Ready(path) => {
             let install_btn = button(i18n.t("InstallAndRestart"))
@@ -955,11 +983,13 @@ fn build_update_section(
                 .on_click(move || {
                     crate::update::launch_installer_and_quit(&path);
                 });
-            Element::from(vstack((
-                Element::from(text_block(i18n.t("UpdateReady"))),
-                Element::from(install_btn),
-            ))
-            .spacing(8.0))
+            Element::from(
+                vstack((
+                    Element::from(text_block(i18n.t("UpdateReady"))),
+                    Element::from(install_btn),
+                ))
+                .spacing(8.0),
+            )
         }
         UpdateState::Failed(err) => {
             let state_clone = Arc::clone(&update_state);
@@ -987,21 +1017,20 @@ fn build_update_section(
                     *sc.lock().unwrap() = new_state;
                 });
             });
-            Element::from(vstack((
-                Element::from(text_block(err_text).font_size(12.0)),
-                Element::from(btn),
-            ))
-            .spacing(8.0))
+            Element::from(
+                vstack((
+                    Element::from(text_block(err_text).font_size(12.0)),
+                    Element::from(btn),
+                ))
+                .spacing(8.0),
+            )
         }
     };
 
     Element::from(
-        border(
-            vstack((Element::from(header), body))
-                .spacing(12.0),
-        )
-        .padding(Thickness::uniform(16.0))
-        .background(ThemeRef::LayerFill)
-        .corner_radius(8.0),
+        border(vstack((Element::from(header), body)).spacing(12.0))
+            .padding(Thickness::uniform(16.0))
+            .background(ThemeRef::LayerFill)
+            .corner_radius(8.0),
     )
 }

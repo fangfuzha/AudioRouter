@@ -1,9 +1,9 @@
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicPtr, AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowTextW, IsWindowVisible, SetForegroundWindow, SetWindowLongPtrW,
-    ShowWindow, CallWindowProcW, SW_HIDE, SW_SHOW, GWLP_WNDPROC, WM_CLOSE,
+    CallWindowProcW, EnumWindows, GetWindowTextW, IsWindowVisible, SetForegroundWindow,
+    SetWindowLongPtrW, ShowWindow, GWLP_WNDPROC, SW_HIDE, SW_SHOW, WM_CLOSE,
 };
 
 static CACHED_HWND: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
@@ -70,9 +70,8 @@ pub fn install_close_to_tray() {
             return;
         }
         unsafe {
-            let prev =
-                SetWindowLongPtrW(hwnd, GWLP_WNDPROC, subclass_wndproc as *const () as isize)
-                    as *mut c_void;
+            let prev = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, subclass_wndproc as *const () as isize)
+                as *mut c_void;
             ORIGINAL_WNDPROC.store(prev, Ordering::SeqCst);
         }
     }

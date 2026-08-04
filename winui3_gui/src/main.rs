@@ -20,7 +20,9 @@ fn app_config_dir() -> std::path::PathBuf {
     std::env::var_os("LOCALAPPDATA")
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("APPDATA").map(std::path::PathBuf::from))
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
+        .unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        })
         .join("AudioRouter")
 }
 
@@ -97,7 +99,9 @@ fn acquire_single_instance() -> Option<*mut core::ffi::c_void> {
         .collect();
 
     // CreateMutexW 返回 HANDLE (*mut c_void)。null 表示创建失败。
-    let handle = unsafe { windows_sys::Win32::System::Threading::CreateMutexW(std::ptr::null(), 0, wide.as_ptr()) };
+    let handle = unsafe {
+        windows_sys::Win32::System::Threading::CreateMutexW(std::ptr::null(), 0, wide.as_ptr())
+    };
     if handle.is_null() {
         // 互斥量创建失败，无法判断，保守地允许启动
         log::warn!("CreateMutexW failed, skipping single-instance check");
