@@ -618,8 +618,15 @@ fn apply_stereo_frames<T>(input: &[T], output: &mut [T], zero: T, mode: ChannelM
 where
     T: Copy + Average,
 {
-    for (src, dst) in input.chunks_exact(2).zip(output.chunks_exact_mut(2)) {
-        let (left, right) = map_stereo_frame(src[0], src[1], zero, mode);
+    // `as_chunks::<2>` is the modern replacement for `chunks_exact(2)`;
+    // clippy 1.98 (`chunks_exact_to_as_chunks`) flags the older form under -D warnings.
+    for ([src_left, src_right], dst) in input
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(output.as_chunks_mut::<2>().0.iter_mut())
+    {
+        let (left, right) = map_stereo_frame(*src_left, *src_right, zero, mode);
         dst[0] = left;
         dst[1] = right;
     }
