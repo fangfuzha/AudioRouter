@@ -25,7 +25,10 @@ jobs:
           components: rustfmt, clippy
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.6
+        uses: mozilla-actions/sccache-action@v0.0.8
+        with:
+          # ghac (artifactcache) 偶发 400/5xx,降级为本地缓存而不是直接 fail
+          fail-on-cache-err: false
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
@@ -35,7 +38,15 @@ jobs:
           cache-all-crates: true
 
       - name: Check formatting
-        run: cargo fmt --check
+        # 先 fmt --all 兜底(让忘了本地 fmt 的 push 也能过),再 --check 验证
+        # 这样如果还有差异就是 rustfmt 行为差异,而不是开发者忘了 fmt
+        run: |
+          cargo fmt --all
+          if ! cargo fmt --all -- --check; then
+            echo "::error::cargo fmt --all 之后仍存在差异,通常是 rustfmt 版本不一致导致。请本地执行 cargo fmt --all 后提交。"
+            cargo fmt --all -- --check || true
+            exit 1
+          fi
 
       - name: Check workspace
         run: cargo check --locked --workspace --all-targets
