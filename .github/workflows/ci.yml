@@ -39,8 +39,11 @@ jobs:
 
       - name: Check formatting
         # 先 fmt --all 兜底(让忘了本地 fmt 的 push 也能过),再 --check 验证
-        # 这样如果还有差异就是 rustfmt 行为差异,而不是开发者忘了 fmt
+        # 这样如果还有差异就是 rustfmt 版本差异,而不是开发者忘了 fmt
+        # runner 默认 shell 是 PowerShell,语法要按 ps 写
+        shell: bash
         run: |
+          set -euo pipefail
           cargo fmt --all
           if ! cargo fmt --all -- --check; then
             echo "::error::cargo fmt --all 之后仍存在差异,通常是 rustfmt 版本不一致导致。请本地执行 cargo fmt --all 后提交。"
