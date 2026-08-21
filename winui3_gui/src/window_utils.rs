@@ -1,6 +1,6 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, EnumWindows, GetWindowTextW, IsWindowVisible, SetForegroundWindow,
     SetWindowLongPtrW, ShowWindow, GWLP_WNDPROC, SW_HIDE, SW_SHOW, WM_CLOSE,
@@ -10,7 +10,7 @@ static CACHED_HWND: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(true);
 static ORIGINAL_WNDPROC: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
-unsafe extern "system" fn enum_callback(hwnd: HWND, _lparam: LPARAM) -> BOOL {
+unsafe extern "system" fn enum_callback(hwnd: HWND, _lparam: LPARAM) -> i32 {
     let mut buf = [0u16; 256];
     let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), 256);
     if len > 0 {
@@ -60,7 +60,18 @@ unsafe extern "system" fn subclass_wndproc(
     if orig == 0 {
         return 0;
     }
-    CallWindowProcW(Some(std::mem::transmute(orig)), hwnd, msg, wparam, lparam)
+    CallWindowProcW(
+        Some(unsafe {
+            std::mem::transmute::<
+                isize,
+                unsafe extern "system" fn(*mut std::ffi::c_void, u32, usize, isize) -> isize,
+            >(orig)
+        }),
+        hwnd,
+        msg,
+        wparam,
+        lparam,
+    )
 }
 
 pub fn install_close_to_tray() {

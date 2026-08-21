@@ -327,10 +327,42 @@ impl AppController {
             return;
         }
 
+        // 在 stop 之前先 snapshot 当前路由配置,stop 失败时回滚到它
+        // (避免 stop 失败但 selected_source / channel_mode 已经被外部修改,
+        //  导致 UI 显示和实际路由不一致)。
+        let previous_source = self.selected_source.clone();
+        let previous_outputs: Vec<(String, bool, Option<String>)> = self
+            .config_manager
+            .handle()
+            .read()
+            .outputs
+            .iter()
+            .map(|o| (o.device_id.clone(), o.enabled, o.channel_mode.clone()))
+            .collect();
+
         if let Err(e) = self.router.stop() {
             self.is_running = self.router.is_running();
-            self.status_text = format!("Error: {e}");
+            self.status_text = format!(
+                "Error: failed to stop previous routing ({}); config not applied",
+                e
+            );
             log::error!("Stop routing before applying config failed: {e}");
+
+            // 尽力回滚 selected_source 和 outputs 到 stop 之前的状态
+            self.selected_source = previous_source;
+            if let Err(rb_err) = self.config_manager.update(|cfg| {
+                cfg.source_device_id = self.selected_source.clone().unwrap_or_default();
+                cfg.outputs = previous_outputs
+                    .into_iter()
+                    .map(|(device_id, enabled, channel_mode)| Output {
+                        device_id,
+                        enabled,
+                        channel_mode,
+                    })
+                    .collect();
+            }) {
+                log::error!("Rollback config after stop failure failed: {rb_err}");
+            }
             return;
         }
         self.is_running = false;

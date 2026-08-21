@@ -3,7 +3,8 @@
 // （位于 LOCALAPPDATA\AudioRouter\logs\winui3_gui.log）。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use app_core::controller::AppController;
 use audio_core::router::Router;
@@ -161,7 +162,8 @@ fn activate_existing_window() {
 /// 初始化日志：release 模式下写入文件，debug 模式下输出到 stderr。
 ///
 /// 日志文件位于 `LOCALAPPDATA\AudioRouter\logs\winui3_gui.log`，
-/// 每次启动追加写入，便于事后排查问题。
+/// 启动时检查文件大小，超过阈值则 rotate 到 `.old`（覆盖），
+/// 避免长时运行的进程把磁盘写满。
 fn init_logger() {
     let env = env_logger::Env::default().default_filter_or("info");
     let mut builder = env_logger::Builder::from_env(env);
@@ -177,6 +179,26 @@ fn init_logger() {
         let log_dir = app_config_dir().join("logs");
         let _ = std::fs::create_dir_all(&log_dir);
         let log_path = log_dir.join("winui3_gui.log");
+        let old_path = log_dir.join("winui3_gui.log.old");
+
+        // 启动时滚动：超过 5 MiB 就把当前日志 rotate 成 .old
+        const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
+        let needs_rotate = match std::fs::metadata(&log_path) {
+            Ok(meta) => meta.len() > MAX_LOG_BYTES,
+            Err(_) => false,
+        };
+        if needs_rotate {
+            // 静默删除旧的 .old（rotate 失败时只 warn，不影响启动）
+            if let Err(e) = std::fs::remove_file(&old_path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("Failed to remove old log file: {e}");
+                }
+            }
+            if let Err(e) = std::fs::rename(&log_path, &old_path) {
+                eprintln!("Failed to rotate log file: {e}");
+            }
+        }
+
         match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -218,7 +240,7 @@ fn main() -> windows_reactor::Result<()> {
     let controller = Arc::new(Mutex::new(AppController::new(config_manager, router)));
 
     {
-        let mut c = controller.lock().unwrap();
+        let mut c = controller.lock();
         c.init();
     }
 
@@ -231,7 +253,7 @@ fn main() -> windows_reactor::Result<()> {
     update::cleanup_old_installers();
 
     {
-        let c = controller.lock().unwrap();
+        let c = controller.lock();
         let i18n = c.i18n.clone();
         drop(c);
         if let Err(e) = tray::init_tray(i18n) {
@@ -244,7 +266,7 @@ fn main() -> windows_reactor::Result<()> {
     // 事后调用 set_backdrop——后者依赖的 ROOT_WINDOW 在 UI 首次挂载后才设置，
     // use_effect 执行时机可能早于该设置，导致 backdrop 被静默丢弃。
     let initial_backdrop = {
-        let c = controller.lock().unwrap();
+        let c = controller.lock();
         c.backdrop()
     };
     let reactor_backdrop = match initial_backdrop {

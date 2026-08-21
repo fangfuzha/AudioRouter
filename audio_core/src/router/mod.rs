@@ -154,14 +154,14 @@ impl Router {
 
         {
             let st = self.inner.read();
-            if let Some(rx) = &st.worker_event_rx {
-                if let Ok(rx) = rx.lock() {
-                    while let Ok(ev) = rx.try_recv() {
-                        if matches!(ev, WorkerEvent::Failed(_)) {
-                            should_reset = true;
-                        }
-                        events.push(ev);
+            if let Some(rx) = &st.worker_event_rx
+                && let Ok(rx) = rx.lock()
+            {
+                while let Ok(ev) = rx.try_recv() {
+                    if matches!(ev, WorkerEvent::Failed(_)) {
+                        should_reset = true;
                     }
+                    events.push(ev);
                 }
             }
         }

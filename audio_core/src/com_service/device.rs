@@ -4,12 +4,9 @@
 //! using Windows Core Audio APIs. It handles device discovery, state checking, and format
 //! information retrieval in a thread-safe manner via the COM worker.
 
-use crate::utils::{map_state, win_helpers};
+use crate::utils::{ComApartment, map_state, win_helpers};
 use anyhow::{Result, anyhow};
-use callcomapi::with_com;
 use serde::{Deserialize, Serialize};
-use std::ffi::OsStr;
-use std::os::windows::ffi::OsStrExt;
 use windows::Win32::Media::Audio::{
     DEVICE_STATE_ACTIVE, IAudioClient, IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator,
     MMDeviceEnumerator, eConsole, eRender,
@@ -112,13 +109,8 @@ pub(super) fn get_output_device_by_id_internal(id: &str) -> Result<IMMDevice> {
         unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
             .map_err(|e| anyhow!("CoCreateInstance MMDeviceEnumerator failed: {:?}", e))?;
 
-    let wide: Vec<u16> = OsStr::new(id)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let pwstr = windows::core::PCWSTR(wide.as_ptr());
-
-    unsafe { enumerator.GetDevice(pwstr) }.map_err(|e| anyhow!("GetDevice failed: {:?}", e))
+    let device_id = windows::core::HSTRING::from(id);
+    unsafe { enumerator.GetDevice(&device_id) }.map_err(|e| anyhow!("GetDevice failed: {:?}", e))
 }
 
 /// Internal function to retrieve detailed information about a specific audio device.
@@ -140,7 +132,11 @@ fn get_device_info_internal(
 ) -> Result<DeviceInfo> {
     let id_pwstr = unsafe { device.GetId() }.map_err(|e| anyhow!("GetId failed: {:?}", e))?;
     let id = unsafe { id_pwstr.to_string() }.unwrap_or_else(|_| String::new());
-    let state = unsafe { device.GetState().unwrap_or(0) };
+    let state = unsafe {
+        device
+            .GetState()
+            .unwrap_or(windows::Win32::Media::Audio::DEVICE_STATE(0))
+    };
 
     let mut friendly_name = id.clone();
     if let Ok(store) = unsafe { device.OpenPropertyStore(STGM_READ) }
@@ -166,7 +162,7 @@ fn get_device_info_internal(
     Ok(DeviceInfo {
         id,
         friendly_name,
-        state: map_state(state),
+        state: map_state(state.0),
         channels,
         channel_mask,
         is_default,
@@ -174,15 +170,15 @@ fn get_device_info_internal(
 }
 
 /// Retrieves a list of all active audio output devices on the system.
-/// This function is thread-safe and handles COM initialization internally via `#[with_com]`.
+/// This function is thread-safe and handles COM initialization internally.
 ///
 /// # Returns
 /// A vector of `DeviceInfo` structs containing details about each device.
 ///
 /// # Errors
 /// Returns an error if device enumeration fails or COM operations encounter issues.
-#[with_com]
 pub fn get_all_output_devices() -> Result<Vec<DeviceInfo>> {
+    let _com = ComApartment::mta()?;
     get_all_output_devices_internal()
 }
 
@@ -193,28 +189,25 @@ pub fn get_all_output_devices() -> Result<Vec<DeviceInfo>> {
 ///
 /// # Errors
 /// Returns an error if the default device cannot be retrieved.
-#[with_com]
 pub fn get_default_output_device() -> Result<DeviceInfo> {
+    let _com = ComApartment::mta()?;
     get_default_output_device_internal()
 }
 
 /// Retrieves an audio device by its ID.
 ///
-/// This function returns a `ComSend<IMMDevice>` to ensure the device interface
-/// can be safely moved between threads.
-///
 /// # Parameters
 /// - `id`: The device ID string.
 ///
 /// # Returns
-/// A `ComSend` wrapper containing the `IMMDevice` interface.
+/// The `IMMDevice` interface for the specified device.
 ///
 /// # Errors
 /// Returns an error if the device with the given ID is not found.
-#[with_com]
-pub fn get_output_device_by_id(id: &str) -> Result<crate::utils::ComSend<IMMDevice>> {
+pub fn get_output_device_by_id(id: &str) -> Result<IMMDevice> {
+    let _com = ComApartment::mta()?;
     let id_str = id.to_string();
-    get_output_device_by_id_internal(&id_str).map(crate::utils::ComSend::new)
+    get_output_device_by_id_internal(&id_str)
 }
 
 #[cfg(test)]
@@ -248,9 +241,7 @@ mod tests {
 
         // Verify lookup by id for the first device
         let first_id = devices[0].id.clone();
-        let found_dev = get_output_device_by_id(&first_id)
-            .expect("lookup by id")
-            .take();
+        let found_dev = get_output_device_by_id(&first_id).expect("lookup by id");
         let id_pwstr = unsafe { found_dev.GetId() }.expect("GetId");
         let id_str = unsafe { id_pwstr.to_string() }.unwrap_or_default();
         assert_eq!(id_str, first_id);

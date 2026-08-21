@@ -1,15 +1,14 @@
 //! Router worker thread implementation.
 
-use anyhow::Result;
-use std::sync::Arc;
-use std::sync::mpsc;
-use std::time::Duration;
-use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
-
 use crate::com_service::router::{
     MixFormat, RouterInitialized, finalize_router, get_mix_format, initialize_router,
     process_next_packet, setup_router_clients,
 };
+use crate::utils::ComApartment;
+use anyhow::Result;
+use std::sync::Arc;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use super::config::RouterConfig;
 
@@ -53,7 +52,7 @@ fn setup_and_run_routing<F>(
 where
     F: Fn(&[f32], u32, u16) + Send + Sync + 'static,
 {
-    let _com = ComApartment::mta()?;
+    let _com = ComApartment::mta().map_err(|e| anyhow::anyhow!("CoInitializeEx failed: {e:?}"))?;
 
     // 首次初始化
     let (setup_res, mix_format, init_res) = match setup_and_initialize(&cfg) {
@@ -109,19 +108,31 @@ where
                     Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
                 }
 
-                // 重试初始化，最多尝试 10 次，每次间隔 500ms
+                // 重试初始化：最多 10 次,前几次短间隔,后几次长间隔(指数退避),
+                // 最长单次间隔 2s,总时长约 10s,给蓝牙耳机配对等慢操作留够时间。
+                // 每次重试前都检查 stop 信号。
+                const MAX_RESTART_ATTEMPTS: u32 = 10;
+                const BASE_BACKOFF_MS: u64 = 200;
+                const MAX_BACKOFF_MS: u64 = 2000;
                 let mut restarted = false;
-                for attempt in 1..=10 {
-                    // 在重试间隔内检查 stop 信号
-                    for _ in 0..10 {
-                        match stop_rx.recv_timeout(Duration::from_millis(50)) {
+                for attempt in 1..=MAX_RESTART_ATTEMPTS {
+                    // 计算本次重试前的等待时长
+                    // 1->200ms, 2->400ms, 3->800ms, 4->1.6s, 5+->2s
+                    let backoff_ms = (BASE_BACKOFF_MS << (attempt - 1).min(4)).min(MAX_BACKOFF_MS);
+                    let total_wait = backoff_ms;
+                    let slice_ms = 50u64;
+                    let slices = total_wait / slice_ms;
+                    for _ in 0..slices {
+                        match stop_rx.recv_timeout(Duration::from_millis(slice_ms)) {
                             Ok(()) => return Ok(()),
                             Err(mpsc::RecvTimeoutError::Timeout) => {}
                             Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
                         }
                     }
 
-                    log::info!("Restart attempt {attempt}/10...");
+                    log::info!(
+                        "Restart attempt {attempt}/{MAX_RESTART_ATTEMPTS} (after {backoff_ms}ms backoff)..."
+                    );
                     match setup_and_initialize(&cfg) {
                         Ok((new_setup, new_mix, new_init)) => {
                             current_setup = new_setup;
@@ -139,8 +150,9 @@ where
                 }
 
                 if !restarted {
-                    let msg = "Failed to restart routing after 10 attempts";
-                    let _ = event_tx.send(WorkerEvent::Failed(msg.to_string()));
+                    let msg =
+                        format!("Failed to restart routing after {MAX_RESTART_ATTEMPTS} attempts");
+                    let _ = event_tx.send(WorkerEvent::Failed(msg.clone()));
                     return Err(anyhow::anyhow!("{msg}"));
                 }
             }
@@ -165,24 +177,6 @@ fn setup_and_initialize(
         &mix_format,
     )?;
     Ok((setup_res, mix_format, init_res))
-}
-
-struct ComApartment;
-
-impl ComApartment {
-    fn mta() -> Result<Self> {
-        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
-            .map_err(|e| anyhow::anyhow!("CoInitializeEx failed: {e:?}"))?;
-        Ok(Self)
-    }
-}
-
-impl Drop for ComApartment {
-    fn drop(&mut self) {
-        unsafe {
-            CoUninitialize();
-        }
-    }
 }
 
 fn event_loop<F>(

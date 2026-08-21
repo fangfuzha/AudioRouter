@@ -18,7 +18,7 @@ fn set_autostart_inner(enabled: bool) -> Result<()> {
         RegOpenKeyExW(
             hkey,
             windows::core::w!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"),
-            0,
+            Some(0),
             KEY_SET_VALUE,
             &mut handle,
         )
@@ -50,7 +50,7 @@ fn set_autostart_inner(enabled: bool) -> Result<()> {
             RegSetValueExW(
                 handle,
                 windows::core::w!("AudioRouter"),
-                0,
+                Some(0),
                 REG_SZ,
                 Some(bytes),
             )

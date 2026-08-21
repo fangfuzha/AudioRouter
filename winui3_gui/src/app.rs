@@ -1,6 +1,7 @@
+use parking_lot::Mutex;
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use app_core::controller::AppController;
@@ -11,8 +12,9 @@ use crate::tray::TrayCommand;
 use crate::window_utils;
 
 /// 更新状态机，用于设置页面的 UI 展示
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum UpdateState {
+    #[default]
     Idle,
     Checking,
     UpToDate,
@@ -28,12 +30,6 @@ pub enum UpdateState {
     },
     Ready(std::path::PathBuf),
     Failed(String),
-}
-
-impl Default for UpdateState {
-    fn default() -> Self {
-        Self::Idle
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -120,7 +116,7 @@ impl Component for RootComponent {
         });
 
         let initial_expanded = {
-            let c = self.controller.lock().unwrap();
+            let c = self.controller.lock();
             c.nav_pane_expanded()
         };
         let (nav_expanded, set_nav_expanded) = cx.use_state(initial_expanded);
@@ -147,7 +143,7 @@ impl Component for RootComponent {
 
         // 启动时从配置加载 close_to_tray 设置并安装窗口子类化
         let close_to_tray_initial = {
-            let c = self.controller.lock().unwrap();
+            let c = self.controller.lock();
             c.close_to_tray()
         };
         cx.use_effect(close_to_tray_initial, move || {
@@ -157,7 +153,7 @@ impl Component for RootComponent {
 
         // 启动时后台静默检查更新（受配置控制）
         let auto_update_enabled = {
-            let c = self.controller.lock().unwrap();
+            let c = self.controller.lock();
             let cfg = c.config_manager.handle();
             let enabled = cfg.read().general.auto_update_check;
             enabled
@@ -199,7 +195,7 @@ impl Component for RootComponent {
                         return;
                     }
                 };
-                *state.lock().unwrap() = new_state;
+                *state.lock() = new_state;
                 // UI 重渲染依赖主循环的 700ms timer 自动触发
             });
         });
@@ -210,7 +206,7 @@ impl Component for RootComponent {
             let set_tick_cell = self.set_tick.clone();
             match DispatcherTimer::new(Duration::from_millis(700), move || {
                 {
-                    let mut c = controller.lock().unwrap();
+                    let mut c = controller.lock();
                     c.refresh_devices();
                     c.poll_router_events();
                 }
@@ -258,6 +254,7 @@ impl Component for RootComponent {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn main_app(
     controller: Arc<Mutex<AppController>>,
     set_tick: SetState<u64>,
@@ -269,7 +266,7 @@ fn main_app(
     set_theme_choice: SetState<ThemeChoice>,
     update_state: Arc<Mutex<UpdateState>>,
 ) -> Element {
-    let c = controller.lock().unwrap();
+    let c = controller.lock();
     let i18n = c.i18n.clone();
     drop(c);
 
@@ -349,7 +346,7 @@ fn main_app(
             .on_selection_changed(move |tag: String| {
                 log::info!("NavigationView selection changed, tag={:?}", tag);
                 if tag == NAV_TAG_HOME {
-                    let mut c = controller_for_handler.lock().unwrap();
+                    let mut c = controller_for_handler.lock();
                     c.begin_settings_edit();
                     set_nav_selected_for_handler.call(NAV_TAG_HOME.to_string());
                 } else if tag == NAV_TAG_GITHUB {
@@ -357,7 +354,7 @@ fn main_app(
                     // 点击 GitHub 项不真正切换页面，弹回之前选中的项
                     set_nav_selected_for_handler.call(nav_selected_for_handler.clone());
                 } else {
-                    let mut c = controller_for_handler.lock().unwrap();
+                    let mut c = controller_for_handler.lock();
                     c.begin_settings_edit();
                     set_nav_selected_for_handler.call(NAV_TAG_SETTINGS.to_string());
                 }
@@ -375,8 +372,8 @@ fn home_page(
     i18n: app_core::i18n::I18n,
     make_setter: impl Fn() + Clone + 'static,
 ) -> Element {
-    let c = controller.lock().unwrap();
-    let source_devices: Vec<_> = c.devices.iter().cloned().collect();
+    let c = controller.lock();
+    let source_devices: Vec<_> = c.devices.to_vec();
     let output_devices: Vec<_> = c.filtered_target_devices().into_iter().cloned().collect();
     let is_running = c.is_running;
     let status_text = c.status_text.clone();
@@ -424,7 +421,7 @@ fn home_page(
             .selected_index(selected_source_index)
             .on_selection_changed(move |index| {
                 if let Some(device) = devices.get(index as usize) {
-                    let mut c = controller_clone.lock().unwrap();
+                    let mut c = controller_clone.lock();
                     c.select_source_device(device.id.clone());
                     refresh();
                 }
@@ -437,7 +434,7 @@ fn home_page(
             let device_id = device.id.clone();
 
             let (enabled, selected_mode_index) = {
-                let c = controller.lock().unwrap();
+                let c = controller.lock();
                 let handle = c.config_manager.handle();
                 let cfg = handle.read();
                 let output = cfg.outputs.iter().find(|o| o.device_id == device_id);
@@ -467,7 +464,7 @@ fn home_page(
                         let refresh = make_setter.clone();
                         let device_id = device_id.clone();
                         check_box(enabled).on_checked(move |checked| {
-                            let mut c = controller_clone.lock().unwrap();
+                            let mut c = controller_clone.lock();
                             c.set_output_enabled(&device_id, checked);
                             refresh();
                         })
@@ -490,7 +487,7 @@ fn home_page(
                                     5 => ChannelMode::LeftOnly,
                                     _ => ChannelMode::RightOnly,
                                 };
-                                let mut c = controller_clone.lock().unwrap();
+                                let mut c = controller_clone.lock();
                                 c.set_output_channel_mode(&device_id, mode);
                                 refresh();
                             })
@@ -508,13 +505,13 @@ fn home_page(
     let toggle_refresh = make_setter.clone();
     let toggle_btn = if is_running {
         button(i18n.t("Stop")).accent().on_click(move || {
-            let mut c = toggle_controller.lock().unwrap();
+            let mut c = toggle_controller.lock();
             c.stop_routing();
             toggle_refresh();
         })
     } else {
         button(i18n.t("Start")).accent().on_click(move || {
-            let mut c = toggle_controller.lock().unwrap();
+            let mut c = toggle_controller.lock();
             c.start_routing();
             toggle_refresh();
         })
@@ -559,6 +556,7 @@ fn home_page(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn settings_page(
     controller: Arc<Mutex<AppController>>,
     i18n: app_core::i18n::I18n,
@@ -578,7 +576,7 @@ fn settings_page(
         theme_index,
         backdrop_index,
     ) = {
-        let c = controller.lock().unwrap();
+        let c = controller.lock();
         let draft = &c.draft_general;
         let lang_idx = match draft.language.as_str() {
             "zh" => 1,
@@ -621,7 +619,7 @@ fn settings_page(
     let back_ctrl = controller.clone();
     let back_nav = set_nav_selected.clone();
     let cancel_btn = button(i18n.t("Cancel")).on_click(move || {
-        let mut c = back_ctrl.lock().unwrap();
+        let mut c = back_ctrl.lock();
         c.begin_settings_edit();
         back_nav.call(NAV_TAG_HOME.to_string());
     });
@@ -630,7 +628,7 @@ fn settings_page(
     let save_refresh = make_setter.clone();
     let save_nav = set_nav_selected.clone();
     let save_btn = button(i18n.t("Save")).accent().on_click(move || {
-        let mut c = save_controller.lock().unwrap();
+        let mut c = save_controller.lock();
         let new_close_to_tray = c.draft_general.close_to_tray;
         let lang_changed = c.save_general_config();
         if lang_changed.is_some() {
@@ -653,7 +651,7 @@ fn settings_page(
                                 .on_checked({
                                     let controller_clone = Arc::clone(&controller);
                                     move |checked| {
-                                        let mut c = controller_clone.lock().unwrap();
+                                        let mut c = controller_clone.lock();
                                         c.draft_general.start_with_windows = checked;
                                     }
                                 }),
@@ -664,7 +662,7 @@ fn settings_page(
                                 .on_checked({
                                     let controller_clone = Arc::clone(&controller);
                                     move |checked| {
-                                        let mut c = controller_clone.lock().unwrap();
+                                        let mut c = controller_clone.lock();
                                         c.draft_general.minimized = checked;
                                     }
                                 }),
@@ -675,7 +673,7 @@ fn settings_page(
                                 .on_checked({
                                     let controller_clone = Arc::clone(&controller);
                                     move |checked| {
-                                        let mut c = controller_clone.lock().unwrap();
+                                        let mut c = controller_clone.lock();
                                         c.draft_general.auto_route = checked;
                                     }
                                 }),
@@ -686,7 +684,7 @@ fn settings_page(
                                 .on_checked({
                                     let controller_clone = Arc::clone(&controller);
                                     move |checked| {
-                                        let mut c = controller_clone.lock().unwrap();
+                                        let mut c = controller_clone.lock();
                                         c.draft_general.close_to_tray = checked;
                                     }
                                 }),
@@ -697,7 +695,7 @@ fn settings_page(
                                 .on_checked({
                                     let controller_clone = Arc::clone(&controller);
                                     move |checked| {
-                                        let mut c = controller_clone.lock().unwrap();
+                                        let mut c = controller_clone.lock();
                                         c.draft_general.auto_update_check = checked;
                                     }
                                 }),
@@ -711,7 +709,7 @@ fn settings_page(
                                         .on_selection_changed({
                                             let controller_clone = Arc::clone(&controller);
                                             move |index| {
-                                                let mut c = controller_clone.lock().unwrap();
+                                                let mut c = controller_clone.lock();
                                                 c.draft_general.language = match index {
                                                     1 => "zh".to_string(),
                                                     _ => "en".to_string(),
@@ -750,7 +748,7 @@ fn settings_page(
                                         .on_selection_changed({
                                             let controller_clone = Arc::clone(&controller);
                                             move |index| {
-                                                let mut c = controller_clone.lock().unwrap();
+                                                let mut c = controller_clone.lock();
                                                 let bd = match index {
                                                     1 => config::config::Backdrop::MicaAlt,
                                                     2 => config::config::Backdrop::Acrylic,
@@ -784,10 +782,12 @@ fn settings_page(
                 .background(ThemeRef::LayerFill)
                 .corner_radius(8.0),
             ),
+            #[allow(clippy::useless_conversion)]
             Element::from(build_update_section(
                 Arc::clone(&update_state),
                 i18n.clone(),
             )),
+            #[allow(clippy::useless_conversion)]
             Element::from(
                 hstack((Element::from(cancel_btn), Element::from(save_btn)))
                     .spacing(8.0)
@@ -812,7 +812,7 @@ fn build_update_section(
     update_state: Arc<Mutex<UpdateState>>,
     i18n: app_core::i18n::I18n,
 ) -> Element {
-    let state = update_state.lock().unwrap().clone();
+    let state = update_state.lock().clone();
     let current_ver = crate::update::current_version();
 
     let header = hstack((
@@ -825,7 +825,7 @@ fn build_update_section(
         UpdateState::Idle => {
             let state_clone = Arc::clone(&update_state);
             let btn = button(i18n.t("CheckForUpdates")).on_click(move || {
-                *state_clone.lock().unwrap() = UpdateState::Checking;
+                *state_clone.lock() = UpdateState::Checking;
                 let sc = Arc::clone(&state_clone);
                 std::thread::spawn(move || {
                     let result = crate::update::check_for_updates();
@@ -844,7 +844,7 @@ fn build_update_section(
                         },
                         crate::update::UpdateCheckResult::Failed(e) => UpdateState::Failed(e),
                     };
-                    *sc.lock().unwrap() = new_state;
+                    *sc.lock() = new_state;
                 });
             });
             Element::from(btn)
@@ -859,7 +859,7 @@ fn build_update_section(
         UpdateState::UpToDate => {
             let state_clone = Arc::clone(&update_state);
             let btn = button(i18n.t("CheckForUpdates")).on_click(move || {
-                *state_clone.lock().unwrap() = UpdateState::Checking;
+                *state_clone.lock() = UpdateState::Checking;
                 let sc = Arc::clone(&state_clone);
                 std::thread::spawn(move || {
                     let result = crate::update::check_for_updates();
@@ -878,7 +878,7 @@ fn build_update_section(
                         },
                         crate::update::UpdateCheckResult::Failed(e) => UpdateState::Failed(e),
                     };
-                    *sc.lock().unwrap() = new_state;
+                    *sc.lock() = new_state;
                 });
             });
             Element::from(
@@ -899,7 +899,7 @@ fn build_update_section(
             let state_clone = Arc::clone(&update_state);
             let url = download_url.clone();
             let download_btn = button(i18n.t("DownloadUpdate")).accent().on_click(move || {
-                *state_clone.lock().unwrap() = UpdateState::Downloading {
+                *state_clone.lock() = UpdateState::Downloading {
                     downloaded: 0,
                     total: file_size,
                 };
@@ -908,7 +908,7 @@ fn build_update_section(
                 std::thread::spawn(move || {
                     let sc_inner = Arc::clone(&sc);
                     let result = crate::update::download_installer(&url2, move |d, t| {
-                        let mut s = sc_inner.lock().unwrap();
+                        let mut s = sc_inner.lock();
                         if let UpdateState::Downloading {
                             ref mut downloaded,
                             ref mut total,
@@ -924,7 +924,7 @@ fn build_update_section(
                         Ok(path) => UpdateState::Ready(path),
                         Err(e) => UpdateState::Failed(e.to_string()),
                     };
-                    *sc.lock().unwrap() = new_state;
+                    *sc.lock() = new_state;
                 });
             });
 
@@ -995,7 +995,7 @@ fn build_update_section(
             let state_clone = Arc::clone(&update_state);
             let err_text = i18n.t("UpdateFailed").replace("{error}", &err);
             let btn = button(i18n.t("CheckForUpdates")).on_click(move || {
-                *state_clone.lock().unwrap() = UpdateState::Checking;
+                *state_clone.lock() = UpdateState::Checking;
                 let sc = Arc::clone(&state_clone);
                 std::thread::spawn(move || {
                     let result = crate::update::check_for_updates();
@@ -1014,7 +1014,7 @@ fn build_update_section(
                         },
                         crate::update::UpdateCheckResult::Failed(e) => UpdateState::Failed(e),
                     };
-                    *sc.lock().unwrap() = new_state;
+                    *sc.lock() = new_state;
                 });
             });
             Element::from(

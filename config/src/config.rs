@@ -113,8 +113,28 @@ impl Default for Config {
 }
 
 impl Config {
+    /// 校验 config 加载后是否处于可接受的 schema 范围内。
+    ///
+    /// 1. `config_version` 必须匹配当前支持的主版本(目前 1),
+    ///    不匹配时记 warn 但不阻断,方便未来追加 v2 schema 时降级读取。
+    /// 2. `outputs` 中 `device_id` 必须唯一,防止用户手改配置文件
+    ///    填入重复条目导致 controller 逻辑误判。
     pub fn validate(&self) -> Result<()> {
-        // Currently no validation needed
+        if self.config_version != 1 {
+            log::warn!(
+                "Config config_version={} differs from supported version 1; \
+                 some fields may be ignored",
+                self.config_version
+            );
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for out in &self.outputs {
+            if !seen.insert(&out.device_id) {
+                anyhow::bail!("Duplicate output device_id in config: {}", out.device_id);
+            }
+        }
+
         Ok(())
     }
 }

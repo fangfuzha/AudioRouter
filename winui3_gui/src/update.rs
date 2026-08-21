@@ -6,7 +6,7 @@
 //! - 安装：下载到临时目录后启动安装包并退出当前进程
 
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{OnceLock, RwLock};
 
 use semver::Version;
 
@@ -92,9 +92,8 @@ fn watch_proxy_registry() {
 }
 
 fn build_agent() -> ureq::Agent {
-    let mut builder = ureq::AgentBuilder::new().tls_connector(Arc::new(
-        ureq::native_tls::TlsConnector::new().expect("failed to create native-tls connector"),
-    ));
+    // ureq 3.x:native-tls feature 自动接管 TLS connector,不再需要手动构造。
+    let mut config_builder = ureq::Agent::config_builder();
 
     // 从全局缓存读取代理设置。
     // 缓存由 init_proxy_watcher() 初始化，后台线程自动监听变化并更新。
@@ -108,7 +107,7 @@ fn build_agent() -> ureq::Agent {
         match ureq::Proxy::new(&proxy_url) {
             Ok(proxy) => {
                 log::info!("Using system proxy: {proxy_url}");
-                builder = builder.proxy(proxy);
+                config_builder = config_builder.proxy(Some(proxy));
             }
             Err(e) => {
                 log::warn!("Invalid proxy URL '{proxy_url}': {e}");
@@ -116,7 +115,7 @@ fn build_agent() -> ureq::Agent {
         }
     }
 
-    builder.build()
+    config_builder.build().into()
 }
 
 /// 读取 Windows 系统代理设置（通过注册表）。
@@ -269,16 +268,16 @@ pub fn check_for_updates() -> UpdateCheckResult {
 
     let release: GithubRelease = match agent
         .get(&url)
-        .set("User-Agent", USER_AGENT)
-        .set("Accept", "application/vnd.github.v3+json")
+        .header("User-Agent", USER_AGENT)
+        .header("Accept", "application/vnd.github.v3+json")
         .call()
     {
-        Ok(resp) => match resp.into_json() {
+        Ok(mut resp) => match resp.body_mut().read_json() {
             Ok(r) => r,
             Err(e) => return UpdateCheckResult::Failed(format!("parse response: {e}")),
         },
-        Err(ureq::Error::Status(code, resp)) => {
-            return UpdateCheckResult::Failed(format!("HTTP {code}: {}", resp.status_text()));
+        Err(ureq::Error::StatusCode(code)) => {
+            return UpdateCheckResult::Failed(format!("HTTP {code}"));
         }
         Err(e) => return UpdateCheckResult::Failed(format!("network error: {e}")),
     };
@@ -344,16 +343,19 @@ pub fn download_installer(
     let agent = build_agent();
     let resp = agent
         .get(download_url)
-        .set("User-Agent", USER_AGENT)
+        .header("User-Agent", USER_AGENT)
         .call()
         .map_err(|e| anyhow::anyhow!("download failed: {e}"))?;
 
+    // headers() 在 into_body() 之前调用,避免 move 后丢失元数据
     let total_size: u64 = resp
-        .header("Content-Length")
+        .headers()
+        .get("Content-Length")
+        .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
-    let mut reader = resp.into_reader();
+    let mut reader = resp.into_body().into_reader();
     let tmp_dir = updates_tmp_dir();
     std::fs::create_dir_all(&tmp_dir)?;
 

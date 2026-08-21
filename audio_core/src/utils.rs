@@ -1,44 +1,22 @@
 use crate::com_service::device::DeviceState;
-use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
-use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, PROPERTYKEY};
+use windows::Win32::Foundation::PROPERTYKEY;
+use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToStringAlloc};
+use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
+use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 use windows::core::GUID;
-
-/// A wrapper to allow passing COM pointers/interfaces between threads safely.
-#[derive(Debug, Clone)]
-pub struct ComSend<T>(T);
-
-unsafe impl<T> Send for ComSend<T> {}
-unsafe impl<T> Sync for ComSend<T> {}
-
-impl<T> ComSend<T> {
-    pub fn new(t: T) -> Self {
-        Self(t)
-    }
-
-    /// Consume the wrapper and return the underlying value.
-    pub fn take(self) -> T {
-        self.0
-    }
-}
-
-impl<T: Send> ComSend<T> {
-    pub fn unwrap(self) -> T {
-        self.0
-    }
-}
 
 /// Maps Windows device state code to DeviceState enum.
 pub(crate) fn map_state(state: u32) -> DeviceState {
     use windows::Win32::Media::Audio::{
         DEVICE_STATE_ACTIVE, DEVICE_STATE_DISABLED, DEVICE_STATE_NOTPRESENT, DEVICE_STATE_UNPLUGGED,
     };
-    if (state & DEVICE_STATE_ACTIVE) != 0 {
+    if (state & DEVICE_STATE_ACTIVE.0) != 0 {
         DeviceState::Active
-    } else if (state & DEVICE_STATE_DISABLED) != 0 {
+    } else if (state & DEVICE_STATE_DISABLED.0) != 0 {
         DeviceState::Disabled
-    } else if (state & DEVICE_STATE_UNPLUGGED) != 0 {
+    } else if (state & DEVICE_STATE_UNPLUGGED.0) != 0 {
         DeviceState::Unplugged
-    } else if (state & DEVICE_STATE_NOTPRESENT) != 0 {
+    } else if (state & DEVICE_STATE_NOTPRESENT.0) != 0 {
         DeviceState::NotPresent
     } else {
         DeviceState::Unknown
@@ -51,7 +29,6 @@ pub mod win_helpers {
 
     #[link(name = "ole32")]
     unsafe extern "system" {
-        pub fn PropVariantClear(pvar: *mut PROPVARIANT) -> i32;
         pub fn CoTaskMemFree(ppv: *mut core::ffi::c_void);
     }
 
@@ -66,22 +43,19 @@ pub mod win_helpers {
         key: &PROPERTYKEY,
     ) -> Option<String> {
         if let Ok(mut pv) = unsafe { store.GetValue(key) } {
-            let mut result = None;
-            let p = unsafe { pv.Anonymous.Anonymous.Anonymous.pwszVal };
-            let raw = p.0 as *const u16;
-            if !raw.is_null() {
-                let mut len = 0usize;
-                while unsafe { *raw.add(len) } != 0 {
-                    len += 1;
-                }
-                let slice = unsafe { std::slice::from_raw_parts(raw, len) };
-                if let Ok(s) = String::from_utf16(slice)
-                    && !s.is_empty()
-                {
-                    result = Some(s);
-                }
-            }
-            unsafe { PropVariantClear(&mut pv) };
+            // 用高层 API PropVariantToStringAlloc 解析字符串 variant,
+            // 避免依赖 PROPVARIANT 内部 union 字段(0.58 已不可见)
+            let result = unsafe { PropVariantToStringAlloc(&pv) }
+                .ok()
+                .and_then(|pwstr| {
+                    let s = unsafe { pwstr.to_string() }.ok().filter(|s| !s.is_empty());
+                    // 释放 PropVariantToStringAlloc 分配的内存
+                    unsafe { CoTaskMemFree(pwstr.0 as *mut _) };
+                    s
+                });
+            unsafe {
+                let _ = PropVariantClear(&mut pv);
+            };
             return result;
         }
         None
@@ -205,5 +179,27 @@ pub unsafe fn parse_mix_format(
         // Free the memory allocated by GetMixFormat
         win_helpers::CoTaskMemFree(pwf as *mut _);
         (Some(channels), channel_mask)
+    }
+}
+
+/// RAII guard for COM apartment initialization.
+///
+/// Calls `CoInitializeEx` on construction and `CoUninitialize` on drop,
+/// ensuring COM is initialized for the duration of the scope.
+pub(crate) struct ComApartment;
+
+impl ComApartment {
+    /// Initialize COM in multithreaded apartment (MTA) mode.
+    pub(crate) fn mta() -> windows::core::Result<Self> {
+        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        unsafe {
+            CoUninitialize();
+        }
     }
 }

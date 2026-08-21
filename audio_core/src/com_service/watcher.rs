@@ -4,9 +4,7 @@
 //! and managing notification clients for audio device changes. All operations are
 //! performed through the COM environment to ensure thread safety and proper COM initialization.
 
-use crate::utils::ComSend;
 use anyhow::{Result, anyhow};
-use callcomapi::with_com;
 use windows::Win32::Media::Audio::{
     IMMDeviceEnumerator, IMMNotificationClient, MMDeviceEnumerator,
 };
@@ -42,63 +40,35 @@ pub(super) fn unregister_notification_internal(
     }
 }
 
-/// Helper that wraps enumerator creation in COM
-///
-/// Creates a new audio device enumerator instance. This function is thread-safe
-/// and ensures the enumerator is created in a properly initialized COM environment.
-///
-/// # Returns
-/// A `ComSend` wrapper containing the `IMMDeviceEnumerator` interface.
+/// Creates a new audio device enumerator instance.
+/// Must be called in a COM-initialized environment.
 ///
 /// # Errors
 /// Returns an error if the COM object creation fails.
-#[with_com]
-pub fn create_enumerator() -> Result<ComSend<IMMDeviceEnumerator>> {
-    create_enumerator_internal().map(ComSend::new)
+pub fn create_enumerator() -> Result<IMMDeviceEnumerator> {
+    create_enumerator_internal()
 }
 
-/// Register a notification client via COM
-///
-/// Registers a notification client with the device enumerator to receive callbacks
-/// for audio device changes (add, remove, state changes, etc.). The registration
-/// is performed in a COM-initialized thread for safety.
-///
-/// # Parameters
-/// - `enumerator`: A `ComSend` wrapper containing the device enumerator.
-/// - `client`: A `ComSend` wrapper containing the notification client.
-///
-/// # Returns
-/// A `ComSend` wrapper containing an empty tuple on success.
+/// Registers a notification client with the device enumerator.
+/// Must be called in a COM-initialized environment.
 ///
 /// # Errors
-/// Returns an error if the registration fails or COM operations encounter issues.
-#[with_com]
+/// Returns an error if the registration fails.
 pub fn register_notification(
-    enumerator: ComSend<IMMDeviceEnumerator>,
-    client: ComSend<IMMNotificationClient>,
-) -> Result<ComSend<()>> {
-    register_notification_internal(&enumerator.take(), &client.take()).map(ComSend::new)
+    enumerator: &IMMDeviceEnumerator,
+    client: &IMMNotificationClient,
+) -> Result<()> {
+    register_notification_internal(enumerator, client)
 }
 
-/// Unregister a notification client via COM
-///
 /// Unregisters a previously registered notification client from the device enumerator.
-/// This stops receiving callbacks for device changes. The unregistration is performed
-/// in a COM-initialized thread for safety.
-///
-/// # Parameters
-/// - `enumerator`: A `ComSend` wrapper containing the device enumerator.
-/// - `client`: A `ComSend` wrapper containing the notification client to unregister.
-///
-/// # Returns
-/// A `ComSend` wrapper containing an empty tuple on success.
+/// Must be called in a COM-initialized environment.
 ///
 /// # Errors
-/// Returns an error if the unregistration fails or COM operations encounter issues.
-#[with_com]
+/// Returns an error if the unregistration fails.
 pub fn unregister_notification(
-    enumerator: ComSend<IMMDeviceEnumerator>,
-    client: ComSend<IMMNotificationClient>,
-) -> Result<ComSend<()>> {
-    unregister_notification_internal(&enumerator.take(), &client.take()).map(ComSend::new)
+    enumerator: &IMMDeviceEnumerator,
+    client: &IMMNotificationClient,
+) -> Result<()> {
+    unregister_notification_internal(enumerator, client)
 }

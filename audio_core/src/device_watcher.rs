@@ -12,6 +12,7 @@ use std::time::Duration;
 use windows::core::implement;
 
 use crate::com_service::device::{DeviceInfo, get_default_output_device};
+use crate::utils::ComApartment;
 
 /// Event types for device changes.
 ///
@@ -36,7 +37,7 @@ use crate::com_service::device::{DeviceInfo, get_default_output_device};
 /// // Stop when done
 /// watcher.stop();
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceEvent {
     /// Something changed in device topology (add/remove/state).
     Changed,
@@ -57,11 +58,11 @@ impl NotificationClient {
     }
 }
 
-impl windows::Win32::Media::Audio::IMMNotificationClient_Impl for NotificationClient {
+impl windows::Win32::Media::Audio::IMMNotificationClient_Impl for NotificationClient_Impl {
     fn OnDeviceStateChanged(
         &self,
         _pwstrdeviceid: &windows::core::PCWSTR,
-        _dwnewstate: u32,
+        _dwnewstate: windows::Win32::Media::Audio::DEVICE_STATE,
     ) -> windows::core::Result<()> {
         let _ = self.sender.send(DeviceEvent::Changed);
         Ok(())
@@ -95,7 +96,7 @@ impl windows::Win32::Media::Audio::IMMNotificationClient_Impl for NotificationCl
     fn OnPropertyValueChanged(
         &self,
         _pwstrdeviceid: &windows::core::PCWSTR,
-        _key: &windows::Win32::UI::Shell::PropertiesSystem::PROPERTYKEY,
+        _key: &windows::Win32::Foundation::PROPERTYKEY,
     ) -> windows::core::Result<()> {
         let _ = self.sender.send(DeviceEvent::Changed);
         Ok(())
@@ -161,6 +162,8 @@ impl Drop for DeviceWatcher {
 
 /// Main watcher thread function.
 fn watcher_thread(event_tx: Sender<DeviceEvent>, stop_rx: Receiver<()>) -> Result<()> {
+    let _com = ComApartment::mta()?;
+
     let enumerator = crate::com_service::watcher::create_enumerator()?;
 
     // Create the COM notification client
@@ -168,10 +171,7 @@ fn watcher_thread(event_tx: Sender<DeviceEvent>, stop_rx: Receiver<()>) -> Resul
         NotificationClient::new(event_tx.clone()).into();
 
     // Register for notifications
-    crate::com_service::watcher::register_notification(
-        enumerator.clone(),
-        crate::utils::ComSend::new(client.clone()),
-    )?;
+    crate::com_service::watcher::register_notification(&enumerator, &client)?;
 
     // Send initial default device event
     if let Ok(d) = get_default_output_device() {
@@ -182,10 +182,7 @@ fn watcher_thread(event_tx: Sender<DeviceEvent>, stop_rx: Receiver<()>) -> Resul
     watcher_event_loop(&stop_rx)?;
 
     // Unregister callback
-    let _ = crate::com_service::watcher::unregister_notification(
-        enumerator,
-        crate::utils::ComSend::new(client),
-    );
+    let _ = crate::com_service::watcher::unregister_notification(&enumerator, &client);
 
     Ok(())
 }
@@ -218,5 +215,40 @@ mod tests {
         }
 
         watcher.stop();
+    }
+
+    #[test]
+    fn device_event_changed_is_debug_and_cloneable() {
+        // Changed variant 不带 payload,确保 Debug / Clone / PartialEq 工作正常,
+        // 避免 GUI 渲染或 pattern match 时 panic。
+        let evt = DeviceEvent::Changed;
+        let copied = evt.clone();
+        assert_eq!(evt, copied);
+        let debug = format!("{evt:?}");
+        assert!(debug.contains("Changed"), "Debug output: {debug}");
+    }
+
+    #[test]
+    fn device_event_default_changed_carry_device_info() {
+        // 构造一个 DefaultChanged 事件,确保 payload 完整传递,
+        // GUI 收到后能正确读取 device info。
+        use crate::com_service::device::{DeviceInfo, DeviceState};
+        let info = DeviceInfo {
+            id: "{0.0.0.00000000}.{test}".to_string(),
+            friendly_name: "Test Speaker".to_string(),
+            state: DeviceState::Active,
+            channels: Some(2),
+            channel_mask: Some(0x3),
+            is_default: true,
+        };
+        let evt = DeviceEvent::DefaultChanged(info.clone());
+        match evt {
+            DeviceEvent::DefaultChanged(got) => {
+                assert_eq!(got.id, info.id);
+                assert_eq!(got.friendly_name, info.friendly_name);
+                assert!(got.is_default);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
     }
 }
