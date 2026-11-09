@@ -5,7 +5,5 @@
     "vadimcn.vscode-lldb",
     "fill-labs.dependi",
     "esbenp.prettier-vscode",
-    "dbaeumer.vscode-eslint",
-    "mhutchie.git-graph",
   ]
 }

@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-parking_lot = "0.12"
+parking_lot = "0.13"
 log = "0.4"
 config = { path = "../config" }
 windows = { version = "0.62", features = [
