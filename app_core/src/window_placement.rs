@@ -40,9 +40,14 @@ impl WindowRect {
 ///
 /// 读取失败或数据损坏时返回 `None`，调用方应回退到默认窗口位置。
 pub fn load_window_placement() -> Option<WindowRect> {
+    load_window_placement_named(VALUE_NAME)
+}
+
+/// 按值名读取窗口矩形（内部使用，供测试隔离数据）。
+fn load_window_placement_named(value_name: &str) -> Option<WindowRect> {
     let handle = open_key(KEY_READ).ok()?;
 
-    let value_name = wide(VALUE_NAME);
+    let value_name = wide(value_name);
     let mut buf = [0u8; 64];
     let mut len: u32 = buf.len() as u32;
     let mut value_type: REG_VALUE_TYPE = REG_VALUE_TYPE(0);
@@ -83,6 +88,11 @@ pub fn load_window_placement() -> Option<WindowRect> {
 ///
 /// 写入失败只返回错误，不影响 GUI 主流程。
 pub fn save_window_placement(rect: WindowRect) -> Result<()> {
+    save_window_placement_named(VALUE_NAME, rect)
+}
+
+/// 按值名保存窗口矩形（内部使用，供测试隔离数据）。
+fn save_window_placement_named(value_name: &str, rect: WindowRect) -> Result<()> {
     if !rect.is_valid() {
         return Err(anyhow!("invalid window rect: {rect:?}"));
     }
@@ -95,7 +105,7 @@ pub fn save_window_placement(rect: WindowRect) -> Result<()> {
         std::slice::from_raw_parts(wide_value.as_ptr() as *const u8, wide_value.len() * 2)
     };
 
-    let value_name = wide(VALUE_NAME);
+    let value_name = wide(value_name);
     let status = unsafe {
         RegSetValueExW(
             handle,
@@ -191,18 +201,22 @@ mod tests {
 
     #[test]
     fn round_trips_through_registry() {
+        // 用独立的值名，避免测试覆盖用户真实保存的窗口位置。
+        const TEST_VALUE: &str = "WindowPlacementTest";
+
         let rect = WindowRect {
             left: 120,
             top: 240,
             width: 1024,
             height: 768,
         };
-        save_window_placement(rect).expect("save");
-        let loaded = load_window_placement().expect("load");
+        save_window_placement_named(TEST_VALUE, rect).expect("save");
+        let loaded = load_window_placement_named(TEST_VALUE).expect("load");
         assert_eq!(loaded, rect);
-        // 清理测试数据，避免污染用户环境
+
+        // 清理测试数据
         if let Ok(handle) = open_key(KEY_READ | KEY_WRITE) {
-            let name = wide(VALUE_NAME);
+            let name = wide(TEST_VALUE);
             unsafe {
                 let _ = windows::Win32::System::Registry::RegDeleteValueW(
                     handle,

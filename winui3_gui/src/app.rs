@@ -144,6 +144,11 @@ impl Component for RootComponent {
         // 先把后台线程投递的事件应用掉（UI 线程）。
         self.apply_pending_events();
 
+        // 窗口钩子与位置恢复：WinUI 的窗口标题在首帧之后才就绪，
+        // 这里每帧尝试，直到成功（成功后内部直接返回，开销可忽略）。
+        window_utils::install_window_hooks();
+        window_utils::restore_window_placement();
+
         // 一次性副作用:在组件 mount 时向 Application.Resources 注入 Pane 背景
         // 覆盖资源,这样 NavigationView 的 Pane 背景才能在亮/暗主题下都正确。
         cx.use_effect((), || {
@@ -164,7 +169,6 @@ impl Component for RootComponent {
                     watcher_slot,
                     render_request,
                 );
-                window_utils::restore_window_placement();
             }
         });
 
@@ -201,7 +205,6 @@ impl Component for RootComponent {
         };
         cx.use_effect(close_to_tray_initial, move || {
             window_utils::set_close_to_tray(close_to_tray_initial);
-            window_utils::install_window_hooks();
         });
 
         // 启动时后台静默检查更新（受配置控制）

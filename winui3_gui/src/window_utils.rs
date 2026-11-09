@@ -13,6 +13,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 static CACHED_HWND: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(true);
 static ORIGINAL_WNDPROC: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+/// 窗口位置是否已经恢复（或本来就没有需要恢复的值）。
+static PLACEMENT_RESTORED: AtomicBool = AtomicBool::new(false);
 
 unsafe extern "system" fn enum_callback(hwnd: HWND, _lparam: LPARAM) -> i32 {
     let mut buf = [0u16; 256];
@@ -84,18 +86,25 @@ unsafe extern "system" fn subclass_wndproc(
 }
 
 /// 安装窗口子类钩子：处理「关闭到托盘」和窗口位置记忆。
+///
+/// WinUI 的窗口标题在首帧渲染之后才设置好，因此首帧往往还找不到窗口。
+/// 这里允许重复调用：装好之后立刻返回（只读两个原子变量），
+/// 未装好时继续找窗口，直到找到为止。
 pub fn install_window_hooks() {
-    if let Some(hwnd) = find_hwnd() {
-        let current = ORIGINAL_WNDPROC.load(Ordering::SeqCst);
-        if !current.is_null() {
-            return;
-        }
-        unsafe {
-            let prev = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, subclass_wndproc as *const () as isize)
-                as *mut c_void;
-            ORIGINAL_WNDPROC.store(prev, Ordering::SeqCst);
-        }
+    if !ORIGINAL_WNDPROC.load(Ordering::SeqCst).is_null() {
+        return;
     }
+
+    let Some(hwnd) = find_hwnd() else {
+        return;
+    };
+
+    unsafe {
+        let prev = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, subclass_wndproc as *const () as isize)
+            as *mut c_void;
+        ORIGINAL_WNDPROC.store(prev, Ordering::SeqCst);
+    }
+    log::info!("Window hooks installed (close-to-tray + placement tracking)");
 }
 
 pub fn set_close_to_tray(enabled: bool) {
@@ -136,20 +145,30 @@ fn current_normal_rect(hwnd: HWND) -> Option<WindowRect> {
 
 /// 恢复上次保存的窗口位置与大小。
 ///
-/// 窗口由框架按默认尺寸创建，这里在首次渲染后把它移动到上次的位置。
+/// 窗口由框架按默认尺寸创建，这里在窗口就绪后把它移动到上次的位置。
 /// 如果保存的位置已经落在虚拟屏幕之外（显示器被拔掉、分辨率变更），
 /// 则放弃恢复，避免窗口“消失”在屏幕外。
-pub fn restore_window_placement() {
+///
+/// 返回 `true` 表示恢复流程已结束（成功恢复或本来就没有保存值），
+/// 返回 `false` 表示窗口还没就绪，调用方可以稍后重试。
+pub fn restore_window_placement() -> bool {
+    if PLACEMENT_RESTORED.load(Ordering::SeqCst) {
+        return true;
+    }
+
     let Some(rect) = app_core::window_placement::load_window_placement() else {
-        return;
+        // 没有保存过位置，无需恢复。
+        PLACEMENT_RESTORED.store(true, Ordering::SeqCst);
+        return true;
     };
     let Some(hwnd) = find_hwnd() else {
-        log::warn!("Window handle not found, skip restoring window placement");
-        return;
+        // 窗口还没创建好，下次再试。
+        return false;
     };
     let Some((x, y)) = clamp_to_virtual_screen(rect) else {
         log::warn!("Saved window placement {rect:?} is outside the virtual screen, ignoring");
-        return;
+        PLACEMENT_RESTORED.store(true, Ordering::SeqCst);
+        return true;
     };
 
     let ok = unsafe {
@@ -165,13 +184,16 @@ pub fn restore_window_placement() {
     };
     if ok == 0 {
         log::warn!("SetWindowPos failed while restoring window placement");
-        return;
+        PLACEMENT_RESTORED.store(true, Ordering::SeqCst);
+        return true;
     }
+    PLACEMENT_RESTORED.store(true, Ordering::SeqCst);
     log::info!(
         "Restored window placement: {x},{y} {}x{}",
         rect.width,
         rect.height
     );
+    true
 }
 
 /// 把保存的矩形夹到虚拟屏幕范围内。
