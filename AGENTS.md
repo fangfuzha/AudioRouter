@@ -163,6 +163,22 @@ Refactor pass complete. Key changes:
 - **CLI builds must be on Windows** — `windows-sys` and `windows`
   are pulled unconditionally; cross-compilation is not configured.
 
+## Release Process
+
+Release is driven by `.github/workflows/release-windows.yml`, which triggers on
+pushing a `v*` tag and uploads an Inno Setup installer to a GitHub Release.
+
+1. Bump `version` in `winui3_gui/Cargo.toml` to the next patch version — it
+   must match the tag, otherwise "check for updates" compares the wrong
+   version (the GUI reads it from `CARGO_PKG_VERSION`).
+2. Commit the bump together with the code changes.
+3. `git push origin main` (CI: fmt / check / test / clippy).
+4. `git tag v<version> && git push origin v<version>` → the release workflow
+   builds `cargo build --locked --release`, so `Cargo.lock` must be
+   committed and consistent with the manifests.
+
+已发布的版本历史见 `git tag --sort=-creatordate`。
+
 ## Validation Commands
 
 Run from `D:\my_project\AudioRouter`:
