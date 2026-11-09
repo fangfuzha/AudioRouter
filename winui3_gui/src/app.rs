@@ -1,13 +1,13 @@
 use parking_lot::Mutex;
-use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use std::time::Duration;
 
 use app_core::controller::AppController;
+use audio_core::device_watcher::DeviceWatcher;
 use audio_core::router::ChannelMode;
 use windows_reactor::*;
 
+use crate::events::{PendingEvents, RenderRequest};
 use crate::tray::TrayCommand;
 use crate::window_utils;
 
@@ -65,7 +65,7 @@ fn open_url_in_browser(url: &str) {
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = Command::new("open").arg(url).spawn();
+        let _ = Command::new("open").args([url]).spawn();
     }
     #[cfg(target_os = "linux")]
     {
@@ -79,15 +79,19 @@ const NAV_TAG_SETTINGS: &str = "settings";
 /// 我们在 on_selection_changed 中通过排除法区分：
 /// - tag == NAV_TAG_HOME        → 切到首页
 /// - tag == NAV_TAG_GITHUB      → 打开仓库 URL（不导航）
-/// - 其它（"settings" 或空串） → 切到设置页
+/// - 其它（"settings" 或空串）  → 切到设置页
 const NAV_TAG_GITHUB: &str = "github";
 const GITHUB_REPO_URL: &str = "https://github.com/fangfuzha/AudioRouter";
 
 pub struct RootComponent {
     controller: Arc<Mutex<AppController>>,
-    tick: Cell<u64>,
-    set_tick: RefCell<Option<SetState<u64>>>,
-    timer: RefCell<Option<DispatcherTimer>>,
+    /// 重绘计数：后台线程递增后写入 AsyncSetState，触发 UI 重绘。
+    tick: Arc<AtomicU64>,
+    /// 后台线程投递的待处理事件（设备变化 / 路由事件 / 托盘命令）。
+    pending: Arc<Mutex<PendingEvents>>,
+    /// 设备热插拔 watcher 句柄，必须保持存活，否则 COM 通知会被注销。
+    device_watcher: Arc<Mutex<Option<DeviceWatcher>>>,
+    /// 更新检查状态（后台线程写入，UI 线程读取）。
     update_state: Arc<Mutex<UpdateState>>,
 }
 
@@ -95,24 +99,73 @@ impl RootComponent {
     pub fn new(controller: Arc<Mutex<AppController>>) -> Self {
         Self {
             controller,
-            tick: Cell::new(0),
-            set_tick: RefCell::new(None),
-            timer: RefCell::new(None),
+            tick: Arc::new(AtomicU64::new(0)),
+            pending: Arc::new(Mutex::new(PendingEvents::default())),
+            device_watcher: Arc::new(Mutex::new(None)),
             update_state: Arc::new(Mutex::new(UpdateState::Idle)),
+        }
+    }
+
+    /// 应用后台线程投递的事件（只在 UI 线程调用）。
+    fn apply_pending_events(&self) {
+        let (router_dirty, tray_commands) = {
+            let mut p = self.pending.lock();
+            (
+                std::mem::take(&mut p.router_dirty),
+                std::mem::take(&mut p.tray_commands),
+            )
+        };
+
+        // 设备枚举在后台线程完成（COM 公寓限制），这里只同步路由状态。
+        if router_dirty {
+            let mut c = self.controller.lock();
+            c.poll_router_events();
+        }
+
+        // 托盘命令必须在 UI 线程执行：SetForegroundWindow 等调用
+        // 只有在 UI 线程上才 reliably 生效。
+        for cmd in tray_commands {
+            match cmd {
+                TrayCommand::ToggleWindow => window_utils::toggle_window(),
+                TrayCommand::ShowWindow => window_utils::show_and_focus_window(),
+                TrayCommand::Quit => std::process::exit(0),
+            }
         }
     }
 }
 
 impl Component for RootComponent {
     fn render(&self, _props: &(), cx: &mut RenderCx) -> Element {
-        let (tick_val, set_tick) = cx.use_state(self.tick.get());
-        self.tick.set(tick_val);
-        *self.set_tick.borrow_mut() = Some(set_tick.clone());
+        // 跨线程安全的重绘触发器：后台线程调用 request() 即可请求重绘，
+        // 不再依赖定时器轮询共享状态。
+        let (_tick_val, set_tick) = cx.use_async_state(0u64);
+        let render_request = RenderRequest::new(Arc::clone(&self.tick), set_tick.clone());
+
+        // 先把后台线程投递的事件应用掉（UI 线程）。
+        self.apply_pending_events();
 
         // 一次性副作用:在组件 mount 时向 Application.Resources 注入 Pane 背景
         // 覆盖资源,这样 NavigationView 的 Pane 背景才能在亮/暗主题下都正确。
         cx.use_effect((), || {
             crate::pane_bg_override::install_pane_background_overrides();
+        });
+
+        // 一次性副作用：启动后台事件源（设备热插拔 / 路由事件 / 托盘交互），
+        // 并恢复上次退出时的窗口位置。
+        cx.use_effect((), {
+            let render_request = render_request.clone();
+            let controller = Arc::clone(&self.controller);
+            let pending = Arc::clone(&self.pending);
+            let watcher_slot = Arc::clone(&self.device_watcher);
+            move || {
+                crate::events::spawn_event_sources(
+                    controller,
+                    pending,
+                    watcher_slot,
+                    render_request,
+                );
+                window_utils::restore_window_placement();
+            }
         });
 
         let initial_expanded = {
@@ -148,7 +201,7 @@ impl Component for RootComponent {
         };
         cx.use_effect(close_to_tray_initial, move || {
             window_utils::set_close_to_tray(close_to_tray_initial);
-            window_utils::install_close_to_tray();
+            window_utils::install_window_hooks();
         });
 
         // 启动时后台静默检查更新（受配置控制）
@@ -159,90 +212,54 @@ impl Component for RootComponent {
             enabled
         };
         let update_state_clone = Arc::clone(&self.update_state);
-        cx.use_effect(auto_update_enabled, move || {
-            if !auto_update_enabled {
-                return;
-            }
-            let state = Arc::clone(&update_state_clone);
-            std::thread::spawn(move || {
-                // 延迟 2 秒再检查，避免影响启动速度
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                let result = crate::update::check_for_updates();
-                let new_state = match result {
-                    crate::update::UpdateCheckResult::UpToDate => {
-                        log::info!(
-                            "Update check: already up to date (v{})",
-                            crate::update::current_version()
-                        );
-                        UpdateState::UpToDate
-                    }
-                    crate::update::UpdateCheckResult::NewVersion {
-                        version,
-                        download_url,
-                        release_notes,
-                        file_size,
-                    } => {
-                        log::info!("Update check: new version {version} available");
-                        UpdateState::Available {
+        cx.use_effect(auto_update_enabled, {
+            let render_request = render_request.clone();
+            move || {
+                if !auto_update_enabled {
+                    return;
+                }
+                let state = Arc::clone(&update_state_clone);
+                let render = render_request.clone();
+                std::thread::spawn(move || {
+                    // 延迟 2 秒再检查，避免影响启动速度
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    let new_state = match crate::update::check_for_updates() {
+                        crate::update::UpdateCheckResult::UpToDate => {
+                            log::info!(
+                                "Update check: already up to date (v{})",
+                                crate::update::current_version()
+                            );
+                            UpdateState::UpToDate
+                        }
+                        crate::update::UpdateCheckResult::NewVersion {
                             version,
                             download_url,
                             release_notes,
                             file_size,
+                        } => {
+                            log::info!("Update check: new version {version} available");
+                            UpdateState::Available {
+                                version,
+                                download_url,
+                                release_notes,
+                                file_size,
+                            }
                         }
-                    }
-                    crate::update::UpdateCheckResult::Failed(e) => {
-                        log::warn!("Update check failed: {e}");
-                        return;
-                    }
-                };
-                *state.lock() = new_state;
-                // UI 重渲染依赖主循环的 700ms timer 自动触发
-            });
-        });
-
-        if self.timer.borrow().is_none() {
-            let controller = Arc::clone(&self.controller);
-            let tick_cell = self.tick.clone();
-            let set_tick_cell = self.set_tick.clone();
-            match DispatcherTimer::new(Duration::from_millis(700), move || {
-                {
-                    let mut c = controller.lock();
-                    c.refresh_devices();
-                    c.poll_router_events();
-                }
-
-                // 托盘图标左键点击与托盘菜单项点击复用同一个命令处理逻辑。
-                // try_recv_tray_event 处理左键点击，try_recv_menu_event 处理菜单项点击。
-                let handle_command = |cmd: TrayCommand| match cmd {
-                    TrayCommand::ToggleWindow => window_utils::toggle_window(),
-                    TrayCommand::ShowWindow => window_utils::show_and_focus_window(),
-                    TrayCommand::Quit => std::process::exit(0),
-                };
-                while let Some(cmd) = crate::tray::try_recv_tray_event() {
-                    handle_command(cmd);
-                }
-                while let Some(cmd) = crate::tray::try_recv_menu_event() {
-                    handle_command(cmd);
-                }
-
-                let new_tick = tick_cell.get().wrapping_add(1);
-                tick_cell.set(new_tick);
-                if let Some(ref setter) = *set_tick_cell.borrow() {
-                    setter.call(new_tick);
-                }
-            }) {
-                Ok(timer) => {
-                    *self.timer.borrow_mut() = Some(timer);
-                }
-                Err(e) => {
-                    log::error!("Failed to create DispatcherTimer: {e}");
-                }
+                        crate::update::UpdateCheckResult::Failed(e) => {
+                            log::warn!("Update check failed: {e}");
+                            UpdateState::Failed(e)
+                        }
+                    };
+                    *state.lock() = new_state;
+                    // 直接请求重绘，不再等待定时器轮询。
+                    render.request();
+                });
             }
-        }
+        });
 
         main_app(
             Arc::clone(&self.controller),
-            set_tick,
+            render_request,
             nav_expanded,
             set_nav_expanded,
             nav_selected,
@@ -257,7 +274,7 @@ impl Component for RootComponent {
 #[allow(clippy::too_many_arguments)]
 fn main_app(
     controller: Arc<Mutex<AppController>>,
-    set_tick: SetState<u64>,
+    render_request: RenderRequest,
     nav_expanded: bool,
     set_nav_expanded: SetState<bool>,
     nav_selected: String,
@@ -270,14 +287,10 @@ fn main_app(
     let i18n = c.i18n.clone();
     drop(c);
 
-    let shared_tick = Arc::new(AtomicU64::new(0));
+    // 刷新句柄：UI 线程和后台线程都可以调用，用来请求一次重绘。
     let make_setter = {
-        let st = Arc::clone(&shared_tick);
-        let setter = set_tick.clone();
-        move || {
-            let new_tick = st.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
-            setter.call(new_tick);
-        }
+        let render = render_request.clone();
+        move || render.request()
     };
 
     // nav_items:首页 + 仓库链接。
@@ -344,7 +357,7 @@ fn main_app(
             .selected_tag(&nav_selected)
             .back_button_visible(false)
             .on_selection_changed(move |tag: String| {
-                log::info!("NavigationView selection changed, tag={:?}", tag);
+                log::info!("NavigationView selection changed, tag={tag:?}");
                 if tag == NAV_TAG_HOME {
                     let mut c = controller_for_handler.lock();
                     c.begin_settings_edit();
@@ -370,7 +383,7 @@ fn main_app(
 fn home_page(
     controller: Arc<Mutex<AppController>>,
     i18n: app_core::i18n::I18n,
-    make_setter: impl Fn() + Clone + 'static,
+    make_setter: impl Fn() + Clone + Send + 'static,
 ) -> Element {
     let c = controller.lock();
     let source_devices: Vec<_> = c.devices.to_vec();
@@ -560,7 +573,7 @@ fn home_page(
 fn settings_page(
     controller: Arc<Mutex<AppController>>,
     i18n: app_core::i18n::I18n,
-    make_setter: impl Fn() + Clone + 'static,
+    make_setter: impl Fn() + Clone + Send + 'static,
     set_nav_selected: SetState<String>,
     theme_choice: ThemeChoice,
     set_theme_choice: SetState<ThemeChoice>,
@@ -786,6 +799,7 @@ fn settings_page(
             Element::from(build_update_section(
                 Arc::clone(&update_state),
                 i18n.clone(),
+                make_setter.clone(),
             )),
             #[allow(clippy::useless_conversion)]
             Element::from(
@@ -806,11 +820,12 @@ fn settings_page(
 
 /// 构建设置页面中的更新区域，根据 UpdateState 展示不同 UI。
 ///
-/// 后台线程只修改共享的 UpdateState，UI 更新依赖主循环的 700ms timer
-/// 触发重渲染。这样避免了把 Rc<SetState> 传到后台线程的问题。
+/// 后台线程只修改共享的 UpdateState，完成后调用 refresh 句柄直接请求
+/// 重绘，不再依赖主循环定时器。
 fn build_update_section(
     update_state: Arc<Mutex<UpdateState>>,
     i18n: app_core::i18n::I18n,
+    refresh: impl Fn() + Clone + Send + 'static,
 ) -> Element {
     let state = update_state.lock().clone();
     let current_ver = crate::update::current_version();
@@ -821,32 +836,44 @@ fn build_update_section(
     ))
     .spacing(8.0);
 
+    // 启动一次后台检查：立即切到 Checking 状态，检查结束后请求重绘。
+    let start_check = {
+        let state = Arc::clone(&update_state);
+        let refresh = refresh.clone();
+        move || {
+            *state.lock() = UpdateState::Checking;
+            // 立即重绘，让用户看到“检查中”。
+            refresh();
+
+            let sc = Arc::clone(&state);
+            let rr = refresh.clone();
+            std::thread::spawn(move || {
+                let result = crate::update::check_for_updates();
+                let new_state = match result {
+                    crate::update::UpdateCheckResult::UpToDate => UpdateState::UpToDate,
+                    crate::update::UpdateCheckResult::NewVersion {
+                        version,
+                        download_url,
+                        release_notes,
+                        file_size,
+                    } => UpdateState::Available {
+                        version,
+                        download_url,
+                        release_notes,
+                        file_size,
+                    },
+                    crate::update::UpdateCheckResult::Failed(e) => UpdateState::Failed(e),
+                };
+                *sc.lock() = new_state;
+                // 检查完成，直接请求重绘。
+                rr();
+            });
+        }
+    };
+
     let body: Element = match state {
         UpdateState::Idle => {
-            let state_clone = Arc::clone(&update_state);
-            let btn = button(i18n.t("CheckForUpdates")).on_click(move || {
-                *state_clone.lock() = UpdateState::Checking;
-                let sc = Arc::clone(&state_clone);
-                std::thread::spawn(move || {
-                    let result = crate::update::check_for_updates();
-                    let new_state = match result {
-                        crate::update::UpdateCheckResult::UpToDate => UpdateState::UpToDate,
-                        crate::update::UpdateCheckResult::NewVersion {
-                            version,
-                            download_url,
-                            release_notes,
-                            file_size,
-                        } => UpdateState::Available {
-                            version,
-                            download_url,
-                            release_notes,
-                            file_size,
-                        },
-                        crate::update::UpdateCheckResult::Failed(e) => UpdateState::Failed(e),
-                    };
-                    *sc.lock() = new_state;
-                });
-            });
+            let btn = button(i18n.t("CheckForUpdates")).on_click(start_check);
             Element::from(btn)
         }
         UpdateState::Checking => Element::from(
@@ -857,30 +884,7 @@ fn build_update_section(
             .spacing(8.0),
         ),
         UpdateState::UpToDate => {
-            let state_clone = Arc::clone(&update_state);
-            let btn = button(i18n.t("CheckForUpdates")).on_click(move || {
-                *state_clone.lock() = UpdateState::Checking;
-                let sc = Arc::clone(&state_clone);
-                std::thread::spawn(move || {
-                    let result = crate::update::check_for_updates();
-                    let new_state = match result {
-                        crate::update::UpdateCheckResult::UpToDate => UpdateState::UpToDate,
-                        crate::update::UpdateCheckResult::NewVersion {
-                            version,
-                            download_url,
-                            release_notes,
-                            file_size,
-                        } => UpdateState::Available {
-                            version,
-                            download_url,
-                            release_notes,
-                            file_size,
-                        },
-                        crate::update::UpdateCheckResult::Failed(e) => UpdateState::Failed(e),
-                    };
-                    *sc.lock() = new_state;
-                });
-            });
+            let btn = button(i18n.t("CheckForUpdates")).on_click(start_check);
             Element::from(
                 vstack((
                     Element::from(text_block(i18n.t("UpToDate"))),
@@ -898,16 +902,29 @@ fn build_update_section(
             let size_str = crate::update::format_size(file_size);
             let state_clone = Arc::clone(&update_state);
             let url = download_url.clone();
+            let download_refresh = refresh.clone();
             let download_btn = button(i18n.t("DownloadUpdate")).accent().on_click(move || {
                 *state_clone.lock() = UpdateState::Downloading {
                     downloaded: 0,
                     total: file_size,
                 };
+                download_refresh();
+
                 let sc = Arc::clone(&state_clone);
                 let url2 = url.clone();
+                let progress_refresh = download_refresh.clone();
                 std::thread::spawn(move || {
+                    // 进度按百分比变化触发重绘，避免每个数据块都刷新 UI。
+                    let last_percent = std::cell::Cell::new(u64::MAX);
                     let sc_inner = Arc::clone(&sc);
+                    let progress_cb_refresh = progress_refresh.clone();
                     let result = crate::update::download_installer(&url2, move |d, t| {
+                        let percent = d.saturating_mul(100).checked_div(t).unwrap_or(0);
+                        if percent == last_percent.get() {
+                            return;
+                        }
+                        last_percent.set(percent);
+
                         let mut s = sc_inner.lock();
                         if let UpdateState::Downloading {
                             ref mut downloaded,
@@ -919,12 +936,16 @@ fn build_update_section(
                                 *total = t;
                             }
                         }
+                        drop(s);
+                        progress_cb_refresh();
                     });
                     let new_state = match result {
                         Ok(path) => UpdateState::Ready(path),
                         Err(e) => UpdateState::Failed(e.to_string()),
                     };
                     *sc.lock() = new_state;
+                    // 下载结束（或失败），请求重绘。
+                    progress_refresh();
                 });
             });
 
@@ -992,31 +1013,8 @@ fn build_update_section(
             )
         }
         UpdateState::Failed(err) => {
-            let state_clone = Arc::clone(&update_state);
             let err_text = i18n.t("UpdateFailed").replace("{error}", &err);
-            let btn = button(i18n.t("CheckForUpdates")).on_click(move || {
-                *state_clone.lock() = UpdateState::Checking;
-                let sc = Arc::clone(&state_clone);
-                std::thread::spawn(move || {
-                    let result = crate::update::check_for_updates();
-                    let new_state = match result {
-                        crate::update::UpdateCheckResult::UpToDate => UpdateState::UpToDate,
-                        crate::update::UpdateCheckResult::NewVersion {
-                            version,
-                            download_url,
-                            release_notes,
-                            file_size,
-                        } => UpdateState::Available {
-                            version,
-                            download_url,
-                            release_notes,
-                            file_size,
-                        },
-                        crate::update::UpdateCheckResult::Failed(e) => UpdateState::Failed(e),
-                    };
-                    *sc.lock() = new_state;
-                });
-            });
+            let btn = button(i18n.t("CheckForUpdates")).on_click(start_check);
             Element::from(
                 vstack((
                     Element::from(text_block(err_text).font_size(12.0)),

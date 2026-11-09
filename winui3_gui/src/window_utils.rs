@@ -1,9 +1,13 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+
+use app_core::window_placement::WindowRect;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallWindowProcW, EnumWindows, GetWindowTextW, IsWindowVisible, SetForegroundWindow,
-    SetWindowLongPtrW, ShowWindow, GWLP_WNDPROC, SW_HIDE, SW_SHOW, WM_CLOSE,
+    CallWindowProcW, EnumWindows, GetSystemMetrics, GetWindowPlacement, GetWindowTextW,
+    IsWindowVisible, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    GWLP_WNDPROC, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOWPLACEMENT, WM_CLOSE, WM_EXITSIZEMOVE,
 };
 
 static CACHED_HWND: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
@@ -56,6 +60,11 @@ unsafe extern "system" fn subclass_wndproc(
         return 0;
     }
 
+    // 移动/缩放拖拽结束后保存窗口位置，供下次启动恢复。
+    if msg == WM_EXITSIZEMOVE {
+        save_window_placement(hwnd);
+    }
+
     let orig = ORIGINAL_WNDPROC.load(Ordering::SeqCst) as isize;
     if orig == 0 {
         return 0;
@@ -74,7 +83,8 @@ unsafe extern "system" fn subclass_wndproc(
     )
 }
 
-pub fn install_close_to_tray() {
+/// 安装窗口子类钩子：处理「关闭到托盘」和窗口位置记忆。
+pub fn install_window_hooks() {
     if let Some(hwnd) = find_hwnd() {
         let current = ORIGINAL_WNDPROC.load(Ordering::SeqCst);
         if !current.is_null() {
@@ -90,6 +100,103 @@ pub fn install_close_to_tray() {
 
 pub fn set_close_to_tray(enabled: bool) {
     CLOSE_TO_TRAY.store(enabled, Ordering::SeqCst);
+}
+
+/// 保存窗口当前的“正常显示”矩形到注册表。
+///
+/// 窗口最大化时保存的是还原后的尺寸，避免下次启动直接以最大化尺寸打开。
+fn save_window_placement(hwnd: HWND) {
+    let Some(rect) = current_normal_rect(hwnd) else {
+        return;
+    };
+    if let Err(e) = app_core::window_placement::save_window_placement(rect) {
+        log::warn!("Failed to save window placement: {e}");
+    }
+}
+
+/// 读取窗口当前的“正常显示”矩形。
+fn current_normal_rect(hwnd: HWND) -> Option<WindowRect> {
+    let mut placement = WINDOWPLACEMENT {
+        length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetWindowPlacement(hwnd, &mut placement) } == 0 {
+        return None;
+    }
+
+    let rc = placement.rcNormalPosition;
+    let rect = WindowRect {
+        left: rc.left,
+        top: rc.top,
+        width: rc.right - rc.left,
+        height: rc.bottom - rc.top,
+    };
+    rect.is_valid().then_some(rect)
+}
+
+/// 恢复上次保存的窗口位置与大小。
+///
+/// 窗口由框架按默认尺寸创建，这里在首次渲染后把它移动到上次的位置。
+/// 如果保存的位置已经落在虚拟屏幕之外（显示器被拔掉、分辨率变更），
+/// 则放弃恢复，避免窗口“消失”在屏幕外。
+pub fn restore_window_placement() {
+    let Some(rect) = app_core::window_placement::load_window_placement() else {
+        return;
+    };
+    let Some(hwnd) = find_hwnd() else {
+        log::warn!("Window handle not found, skip restoring window placement");
+        return;
+    };
+    let Some((x, y)) = clamp_to_virtual_screen(rect) else {
+        log::warn!("Saved window placement {rect:?} is outside the virtual screen, ignoring");
+        return;
+    };
+
+    let ok = unsafe {
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            x,
+            y,
+            rect.width,
+            rect.height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    };
+    if ok == 0 {
+        log::warn!("SetWindowPos failed while restoring window placement");
+        return;
+    }
+    log::info!(
+        "Restored window placement: {x},{y} {}x{}",
+        rect.width,
+        rect.height
+    );
+}
+
+/// 把保存的矩形夹到虚拟屏幕范围内。
+///
+/// 返回 `None` 表示保存的位置已经完全不可见（应当放弃恢复）。
+fn clamp_to_virtual_screen(rect: WindowRect) -> Option<(i32, i32)> {
+    let vx = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+    let vy = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+    let vw = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+    let vh = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+    if vw <= 0 || vh <= 0 {
+        return Some((rect.left, rect.top));
+    }
+
+    let intersects = rect.left < vx + vw
+        && rect.left + rect.width > vx
+        && rect.top < vy + vh
+        && rect.top + rect.height > vy;
+    if !intersects {
+        return None;
+    }
+
+    let max_x = (vx + vw - rect.width).max(vx);
+    let max_y = (vy + vh - rect.height).max(vy);
+    Some((rect.left.clamp(vx, max_x), rect.top.clamp(vy, max_y)))
 }
 
 #[allow(dead_code)]

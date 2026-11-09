@@ -6,3 +6,5 @@ pub mod update;
 
 #[cfg(target_os = "windows")]
 pub mod autostart;
+#[cfg(target_os = "windows")]
+pub mod window_placement;

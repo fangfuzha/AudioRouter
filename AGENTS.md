@@ -20,7 +20,7 @@ Workspace members (`Cargo.toml`):
 |---------------|-----------------------------------------------------------------|-----------------------------------------------------|
 | `audio_core`  | WASAPI loopback capture + multi-render, device enum, hot-plug   | `config`, `windows 0.62`, `windows-core 0.62`       |
 | `config`      | Atomic `settings.toml` read/write + schema validation           | `serde`, `toml 1`                                   |
-| `app_core`    | `AppController`, i18n, autostart, GitHub Release update check    | `audio_core`, `config`, `windows 0.62`              |
+| `app_core`    | `AppController`, i18n, autostart, window placement registry    | `audio_core`, `config`, `windows 0.62`              |
 | `winui3_gui`  | WinUI 3 frontend (windows-reactor), tray, single-instance, proxy | `app_core`, `audio_core`, `windows-reactor` (git)  |
 
 Dependency direction is one-way: `winui3_gui → app_core → audio_core → config`.
@@ -39,9 +39,35 @@ client and writes to N render clients on a 3ms timer; see
 - WinUI app entry: `winui3_gui/src/main.rs`
 - Update + proxy hot-reload: `winui3_gui/src/update.rs`
 - Tray icon: `winui3_gui/src/tray.rs`
+- Background event sources (device hot-plug / router events / tray): `winui3_gui/src/events.rs`
+- Window placement + close-to-tray hooks: `winui3_gui/src/window_utils.rs`
 - Installer script: `scripts/build-installer.ps1`
 
 For end-user docs see `README.md`; for short-term todos see `TODO.md`.
+
+## Current Status (2026-11-10)
+
+Event-driven rework of the WinUI frontend:
+
+- **The 700ms `DispatcherTimer` poll is gone.** Device hot-plug, router
+  state and tray interactions are now event-driven; background threads
+  request a repaint through `RenderCx::use_async_state` (an
+  `AsyncSetState<u64>`, safe to call from any thread) instead of the GUI
+  polling shared state on a timer.
+- **Device enumeration moved off the UI thread.** WinUI's UI thread is an STA
+  apartment, while `audio_core` needs COM MTA (`ComApartment::mta()`);
+  enumerating on the UI thread fails with RPC_E_CHANGED_MODE (0x80010106).
+  The device watcher thread now enumerates and the UI only reads the result.
+- **Window position memory**: `app_core::window_placement` stores the
+  window rect in `HKCU\Software\AudioRouter\WindowPlacement`; the GUI saves
+  on `WM_EXITSIZEMOVE` and restores on startup (clamped to the virtual
+  screen).
+- **Update check uses mirror fallbacks**: the GitHub API and release assets
+  are tried against the official endpoint first, then a list of prefix-style
+  GitHub proxies (`MIRROR_PREFIXES` in `winui3_gui/src/update.rs`).
+  Override with the `AUDIO_ROUTER_GITHUB_MIRROR` environment variable.
+- `audio_core::Router::subscribe()` added so the GUI can block on router
+  events instead of polling `poll_events()`.
 
 ## Current Status (2026-08-21)
 
@@ -124,6 +150,16 @@ Refactor pass complete. Key changes:
 - **`windows-reactor` `Element::from(...)` is required** in some
   builder contexts — clippy's `useless_conversion` lint is suppressed
   locally; do not strip the `#[allow]` without testing the UI.
+- **COM apartment on the UI thread**: WinUI initializes its UI thread as
+  STA. Any `CoInitializeEx(COINIT_MULTITHREADED)` there returns
+  RPC_E_CHANGED_MODE (0x80010106). Device enumeration therefore runs on the
+  device-watcher thread, never on the UI thread.
+- **Cross-thread repaint**: `RenderCx::use_state` returns an Rc-backed
+  `SetState` and must stay on the UI thread. Use
+  `RenderCx::use_async_state` when a background thread needs to trigger a
+  repaint; its `AsyncSetState::call` marshals onto the UI thread. It is a
+  no-op when the written value is unchanged, so always write a fresh
+  counter value.
 - **CLI builds must be on Windows** — `windows-sys` and `windows`
   are pulled unconditionally; cross-compilation is not configured.
 

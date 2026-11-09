@@ -17,17 +17,31 @@ thread_local! {
     static TRAY_STATE: RefCell<Option<TrayState>> = const { RefCell::new(None) };
 }
 
-#[allow(dead_code)]
+/// 托盘交互产生的命令。
+#[derive(Clone, Copy, Debug)]
 pub enum TrayCommand {
     ToggleWindow,
     ShowWindow,
     Quit,
 }
 
+/// 已注册菜单项的 id。
+///
+/// 菜单事件在后台线程接收，而菜单项本身保存在创建线程的 thread_local 中，
+/// 因此把 id 复制出来交给后台线程做事件翻译。
+#[derive(Clone)]
+pub struct TrayMenuIds {
+    show: MenuId,
+    quit: MenuId,
+}
+
+/// 菜单项 id 类型（muda::MenuId）。
+use tray_icon::menu::MenuId;
+
 /// 初始化系统托盘图标，并在 thread_local 中保持存活。
 ///
 /// `i18n` 用于翻译菜单项文本；左键点击不会弹出菜单（只在右键点击时弹出），
-/// 左键点击的事件由 `try_recv_tray_event` 处理为 `ToggleWindow`。
+/// 左键点击的事件由 `command_from_tray_event` 翻译为 `ShowWindow`。
 pub fn init_tray(i18n: I18n) -> anyhow::Result<()> {
     let icon = load_icon()?;
 
@@ -73,46 +87,58 @@ pub fn update_tray_language(i18n: &I18n) {
     });
 }
 
-/// 尝试接收托盘图标点击事件。
-pub fn try_recv_tray_event() -> Option<TrayCommand> {
-    while let Ok(event) = TrayIconEvent::receiver().try_recv() {
-        if let TrayIconEvent::Click {
-            button,
-            button_state,
-            ..
-        } = event
+/// 读取已注册的菜单项 id。
+///
+/// 必须在创建托盘图标的那个线程上调用（菜单项保存在 thread_local 中）。
+pub fn menu_item_ids() -> Option<TrayMenuIds> {
+    TRAY_STATE.with(|s| {
+        let borrow = s.borrow();
+        let state = borrow.as_ref()?;
+        Some(TrayMenuIds {
+            show: state.show_item.id().clone(),
+            quit: state.quit_item.id().clone(),
+        })
+    })
+}
+
+/// 托盘图标事件接收端（可跨线程使用）。
+pub fn tray_event_receiver() -> tray_icon::TrayIconEventReceiver {
+    TrayIconEvent::receiver().clone()
+}
+
+/// 托盘菜单事件接收端（可跨线程使用）。
+pub fn menu_event_receiver() -> tray_icon::menu::MenuEventReceiver {
+    MenuEvent::receiver().clone()
+}
+
+/// 把托盘图标事件翻译成命令。
+///
+/// 左键单击（抬起）= 显示并聚焦窗口；其余事件忽略。
+pub fn command_from_tray_event(event: &TrayIconEvent) -> Option<TrayCommand> {
+    if let TrayIconEvent::Click {
+        button,
+        button_state,
+        ..
+    } = event
+    {
+        if *button == tray_icon::MouseButton::Left
+            && *button_state == tray_icon::MouseButtonState::Up
         {
-            if button == tray_icon::MouseButton::Left
-                && button_state == tray_icon::MouseButtonState::Up
-            {
-                return Some(TrayCommand::ShowWindow);
-            }
+            return Some(TrayCommand::ShowWindow);
         }
     }
     None
 }
 
-/// 尝试接收托盘菜单事件。
-///
-/// 通过比较 MenuEvent 的 id 与已注册菜单项的 id 来区分命令。
-pub fn try_recv_menu_event() -> Option<TrayCommand> {
-    while let Ok(event) = MenuEvent::receiver().try_recv() {
-        let cmd = TRAY_STATE.with(|s| {
-            let borrow = s.borrow();
-            let state = borrow.as_ref()?;
-            if event.id == *state.show_item.id() {
-                Some(TrayCommand::ToggleWindow)
-            } else if event.id == *state.quit_item.id() {
-                Some(TrayCommand::Quit)
-            } else {
-                None
-            }
-        });
-        if cmd.is_some() {
-            return cmd;
-        }
+/// 把托盘菜单事件翻译成命令。
+pub fn command_from_menu_event(event: &MenuEvent, ids: &TrayMenuIds) -> Option<TrayCommand> {
+    if event.id == ids.show {
+        Some(TrayCommand::ToggleWindow)
+    } else if event.id == ids.quit {
+        Some(TrayCommand::Quit)
+    } else {
+        None
     }
-    None
 }
 
 fn load_icon() -> anyhow::Result<Icon> {

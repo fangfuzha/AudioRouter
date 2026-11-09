@@ -12,6 +12,7 @@ use config::ConfigManager;
 use windows_reactor::*;
 
 mod app;
+mod events;
 mod pane_bg_override;
 mod tray;
 mod update;

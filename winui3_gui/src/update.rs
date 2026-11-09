@@ -15,6 +15,28 @@ const GITHUB_REPO: &str = "AudioRouter";
 const USER_AGENT: &str = "AudioRouter-Updater";
 const INSTALLER_PATTERN: &str = "AudioRouter-Setup-";
 
+/// GitHub 镜像前缀（按顺序尝试）。
+///
+/// 空字符串表示官方直连；其余是常见的前缀式 GitHub 代理。国内网络下
+/// api.github.com 经常连不上，逐个回退能显著提高更新检查成功率。
+const MIRROR_PREFIXES: &[&str] = &[
+    "",
+    "https://ghfast.top/",
+    "https://gh-proxy.com/",
+    "https://ghproxy.net/",
+];
+
+/// 自定义镜像前缀的环境变量名。
+///
+/// 设置后（例如 https://my-proxy.example.com/ ）该前缀会被排在候选列表
+/// 最前面，用于企业内网代理或自建反代。
+const MIRROR_ENV: &str = "AUDIO_ROUTER_GITHUB_MIRROR";
+
+/// 连接超时：镜像不可达时快速失败并切换到下一个候选。
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// 更新检查（API 请求）的整体超时。
+const API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// 全局代理状态缓存。
 ///
 /// 启动时由 `init_proxy_watcher()` 初始化，后台线程监听注册表变化
@@ -91,9 +113,31 @@ fn watch_proxy_registry() {
     unsafe { RegCloseKey(hkey) };
 }
 
+/// 构造用于 API 请求的 agent（带连接超时与整体超时）。
 fn build_agent() -> ureq::Agent {
+    let config_builder = ureq::Agent::config_builder()
+        .timeout_connect(Some(CONNECT_TIMEOUT))
+        .timeout_global(Some(API_TIMEOUT));
+
+    let config_builder = apply_system_proxy(config_builder);
+    config_builder.build().into()
+}
+
+/// 构造用于下载安装包的 agent。
+///
+/// 下载可能持续数分钟，因此只设连接超时，不设整体超时。
+fn build_download_agent() -> ureq::Agent {
+    let config_builder = ureq::Agent::config_builder().timeout_connect(Some(CONNECT_TIMEOUT));
+
+    let config_builder = apply_system_proxy(config_builder);
+    config_builder.build().into()
+}
+
+/// 把系统代理设置写入 ureq 配置。
+fn apply_system_proxy(
+    mut config_builder: ureq::config::ConfigBuilder<ureq::typestate::AgentScope>,
+) -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
     // ureq 3.x:native-tls feature 自动接管 TLS connector,不再需要手动构造。
-    let mut config_builder = ureq::Agent::config_builder();
 
     // 从全局缓存读取代理设置。
     // 缓存由 init_proxy_watcher() 初始化，后台线程自动监听变化并更新。
@@ -115,7 +159,7 @@ fn build_agent() -> ureq::Agent {
         }
     }
 
-    config_builder.build().into()
+    config_builder
 }
 
 /// 读取 Windows 系统代理设置（通过注册表）。
@@ -255,33 +299,72 @@ pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// 生成候选 URL 列表：自定义前缀优先，然后是内置镜像列表。
+///
+/// 前缀为空表示直连原始地址；其余把原始地址整体拼在代理前缀之后。
+fn candidate_urls(path: &str) -> Vec<String> {
+    let mut prefixes: Vec<String> = Vec::new();
+
+    if let Ok(custom) = std::env::var(MIRROR_ENV) {
+        let custom = custom.trim();
+        if !custom.is_empty() {
+            let mut prefix = custom.to_string();
+            if !prefix.ends_with('/') {
+                prefix.push('/');
+            }
+            prefixes.push(prefix);
+        }
+    }
+
+    prefixes.extend(MIRROR_PREFIXES.iter().map(|p| p.to_string()));
+    prefixes.into_iter().map(|p| format!("{p}{path}")).collect()
+}
+
 /// 向 GitHub API 请求最新 release 信息并比较版本。
 ///
 /// 阻塞调用，应在后台线程中执行。
+///
+/// 会依次尝试官方地址与各镜像代理：任意一个成功即采用其结果，
+/// 全部失败时返回最后一次错误。
 pub fn check_for_updates() -> UpdateCheckResult {
-    let url = format!(
-        "https://api.github.com/repos/{}/{}/releases/latest",
-        GITHUB_OWNER, GITHUB_REPO
-    );
+    let api_path =
+        format!("https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest");
 
     let agent = build_agent();
+    let mut last_error = "no update source available".to_string();
 
-    let release: GithubRelease = match agent
-        .get(&url)
+    for url in candidate_urls(&api_path) {
+        match fetch_release(&agent, &url) {
+            Ok(release) => return compare_release(release),
+            Err(e) => {
+                log::warn!("Update check via {url} failed: {e}");
+                last_error = e;
+            }
+        }
+    }
+
+    UpdateCheckResult::Failed(last_error)
+}
+
+/// 请求单个地址并解析 release JSON。
+fn fetch_release(agent: &ureq::Agent, url: &str) -> Result<GithubRelease, String> {
+    let mut resp = agent
+        .get(url)
         .header("User-Agent", USER_AGENT)
         .header("Accept", "application/vnd.github.v3+json")
         .call()
-    {
-        Ok(mut resp) => match resp.body_mut().read_json() {
-            Ok(r) => r,
-            Err(e) => return UpdateCheckResult::Failed(format!("parse response: {e}")),
-        },
-        Err(ureq::Error::StatusCode(code)) => {
-            return UpdateCheckResult::Failed(format!("HTTP {code}"));
-        }
-        Err(e) => return UpdateCheckResult::Failed(format!("network error: {e}")),
-    };
+        .map_err(|e| match e {
+            ureq::Error::StatusCode(code) => format!("HTTP {code}"),
+            other => format!("network error: {other}"),
+        })?;
 
+    resp.body_mut()
+        .read_json()
+        .map_err(|e| format!("parse response: {e}"))
+}
+
+/// 比较版本号并匹配安装包 asset。
+fn compare_release(release: GithubRelease) -> UpdateCheckResult {
     if release.draft || release.prerelease {
         return UpdateCheckResult::UpToDate;
     }
@@ -336,11 +419,34 @@ pub fn check_for_updates() -> UpdateCheckResult {
 /// 下载安装包到临时目录，返回本地文件路径。
 ///
 /// 阻塞调用，应在后台线程中执行。
+///
+/// 与更新检查一样依次尝试各镜像代理，全部失败才返回错误。
 pub fn download_installer(
     download_url: &str,
     progress: impl Fn(u64, u64),
 ) -> anyhow::Result<PathBuf> {
-    let agent = build_agent();
+    let agent = build_download_agent();
+    let mut last_error = anyhow::anyhow!("download failed");
+
+    for url in candidate_urls(download_url) {
+        match download_from(&agent, &url, &progress) {
+            Ok(path) => return Ok(path),
+            Err(e) => {
+                log::warn!("Download via {url} failed: {e}");
+                last_error = e;
+            }
+        }
+    }
+
+    Err(last_error)
+}
+
+/// 从单个地址下载安装包到临时目录。
+fn download_from(
+    agent: &ureq::Agent,
+    download_url: &str,
+    progress: &impl Fn(u64, u64),
+) -> anyhow::Result<PathBuf> {
     let resp = agent
         .get(download_url)
         .header("User-Agent", USER_AGENT)
@@ -359,9 +465,14 @@ pub fn download_installer(
     let tmp_dir = updates_tmp_dir();
     std::fs::create_dir_all(&tmp_dir)?;
 
+    // 文件名取 URL 最后一段（去掉查询串），镜像前缀不影响结果。
     let file_name = download_url
+        .split('?')
+        .next()
+        .unwrap_or(download_url)
         .rsplit('/')
         .next()
+        .filter(|s| !s.is_empty())
         .unwrap_or("AudioRouter-Setup.exe");
     let dest_path = tmp_dir.join(file_name);
 

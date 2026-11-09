@@ -12,7 +12,7 @@ pub use state::RouterState;
 pub use worker::WorkerEvent;
 
 use anyhow::{Result, anyhow};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -21,6 +21,9 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub struct Router {
     inner: Arc<RwLock<RouterState>>,
+    /// 事件订阅者列表：worker 产生事件时同时转发给这些订阅者，
+    /// 让 GUI 可以用阻塞接收代替定时轮询来感知状态变化。
+    subscribers: Arc<Mutex<Vec<mpsc::Sender<WorkerEvent>>>>,
 }
 
 impl Router {
@@ -28,6 +31,7 @@ impl Router {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(RouterState::default())),
+            subscribers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -58,9 +62,10 @@ impl Router {
         let (ready_tx, ready_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         let cfg_for_worker = cfg.clone();
+        let subscribers = Arc::clone(&self.subscribers);
 
         let handle = thread::spawn(move || {
-            worker::run_worker(cfg_for_worker, cb, stop_rx, ready_tx, event_tx)
+            worker::run_worker(cfg_for_worker, cb, stop_rx, ready_tx, event_tx, subscribers)
         });
 
         match ready_rx.recv_timeout(Duration::from_secs(5)) {
@@ -142,6 +147,20 @@ impl Router {
     /// Returns whether the router is currently running.
     pub fn is_running(&self) -> bool {
         self.inner.read().running
+    }
+
+    /// 订阅 worker 事件。
+    ///
+    /// 返回的 Receiver 会收到与 poll_events 相同的事件流，但可以阻塞接收：
+    /// GUI 侧用一个后台线程 recv()，事件到达时立刻触发重绘，
+    /// 无需再用定时器轮询。
+    ///
+    /// 订阅者通道无界，订阅者长时间不读也不会阻塞 worker；
+    /// 接收端被 drop 后，worker 会自动移除该订阅者。
+    pub fn subscribe(&self) -> mpsc::Receiver<WorkerEvent> {
+        let (tx, rx) = mpsc::channel();
+        self.subscribers.lock().push(tx);
+        rx
     }
 
     /// 轮询 worker 事件。应定期调用（如 GUI 定时器）以同步状态。
