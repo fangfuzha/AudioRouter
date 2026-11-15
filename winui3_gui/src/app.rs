@@ -683,6 +683,10 @@ fn settings_page(
             crate::tray::update_tray_language(&c.i18n);
         }
         window_utils::set_close_to_tray(new_close_to_tray);
+        let hotkey = c.global_hotkey();
+        if let Err(error) = window_utils::configure_global_hotkey(&hotkey) {
+            log::warn!("Failed to apply global hotkey immediately: {error}");
+        }
         save_refresh();
         save_nav.call(NAV_TAG_HOME.to_string());
     });

@@ -147,6 +147,11 @@ pub fn apply_start_hidden() {
 
 pub fn configure_global_hotkey(value: &str) -> Result<(), String> {
     let hwnd = find_hwnd().ok_or_else(|| "window handle not found".to_string())?;
+    let parsed = if value.trim().is_empty() {
+        None
+    } else {
+        Some(app_core::hotkey::parse(value).map_err(|e| e.to_string())?)
+    };
     let old_vk = REGISTERED_HOTKEY_VK.swap(0, Ordering::SeqCst);
     let old_mods = REGISTERED_HOTKEY_MODS.swap(0, Ordering::SeqCst);
     if old_vk != 0 {
@@ -154,11 +159,9 @@ pub fn configure_global_hotkey(value: &str) -> Result<(), String> {
             UnregisterHotKey(hwnd, HOTKEY_ID);
         }
     }
-    if value.trim().is_empty() {
+    let Some(hotkey) = parsed else {
         return Ok(());
-    }
-
-    let hotkey = app_core::hotkey::parse(value).map_err(|e| e.to_string())?;
+    };
     let ok = unsafe { RegisterHotKey(hwnd, HOTKEY_ID, hotkey.modifiers, hotkey.vk) };
     if ok == 0 {
         if old_vk != 0 {
