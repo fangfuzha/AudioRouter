@@ -142,19 +142,21 @@ Refactor pass complete. Key changes:
 ## High-Priority Remaining Work
 
 1. **TODO.md items**:
-   - "Update logic added, not verified" — manually exercise
-     `winui3_gui::update::check_for_updates` against a real GitHub
-     release to confirm download + installer handoff works.
+   - "Update logic added, not verified" — the download half is now covered
+     by `update::tests::downloads_latest_installer` (`#[ignore]`, needs
+     network). Run `cargo test -p winui3_gui --bin winui3_gui -- --ignored`
+     to exercise fetch + download against the real latest release. The
+     installer handoff itself (`launch_installer_and_quit`) still needs a
+     human pass: it installs over the running build.
    - "Icon replacement" — swap `assets/icon.ico` and
      `assets/icon.png` (used by `build.rs` `winres` and tray fallback).
+     The current assets are technically fine (PNG has alpha, the ICO carries
+     16/32/48/256); this is an art-direction task, so it needs a design
+     decision rather than a mechanical swap.
    - Multi-channel routing (5.1 → stereo downmix) is out of scope per
      the existing `decode_channel_mask` parsing in
      `audio_core/src/utils.rs`.
-2. **`apply_running_config` UX** — when stop succeeds but the
-   subsequent `start_routing` fails, the user sees a stale
-   `is_running = false` with no clear "previous routing was torn down"
-   indicator. Consider adding an explicit "Stopped" state message.
-3. **Single `windows` version** — `windows-reactor` git rev is the
+2. **Single `windows` version** — `windows-reactor` git rev is the
    last holdout pulling the workspace's `windows 0.62` line; pin or
    vendor once a stable release is published.
 

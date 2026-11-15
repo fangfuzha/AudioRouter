@@ -590,3 +590,53 @@ pub fn cleanup_old_installers() {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 真实下载链路验证：需要联网，默认跳过。
+    ///
+    /// 跑法：`cargo test -p winui3_gui --bin winui3_gui -- --ignored`
+    ///
+    /// 覆盖「拉取最新 release → 找到安装包 asset → 下载落盘」这条链路，
+    /// 用来确认 GitHub API、镜像回退和临时目录写入都还正常。
+    #[test]
+    #[ignore = "requires network access"]
+    fn downloads_latest_installer() {
+        let agent = build_agent();
+        let api_path =
+            format!("https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest");
+
+        let mut latest = None;
+        for url in candidate_urls(&api_path) {
+            match fetch_release(&agent, &url) {
+                Ok(release) => {
+                    latest = Some(release);
+                    break;
+                }
+                Err(e) => eprintln!("release fetch via {url} failed: {e}"),
+            }
+        }
+        let release = latest.expect("failed to fetch the latest release");
+
+        let installer = release
+            .assets
+            .iter()
+            .find(|a| a.name.starts_with(INSTALLER_PATTERN) && a.name.ends_with("-x64.exe"))
+            .expect("latest release carries no installer asset");
+        assert!(installer.size > 0, "installer asset reports zero size");
+
+        let path = download_installer(&installer.browser_download_url, |_, _| {})
+            .expect("failed to download the installer");
+        let downloaded = std::fs::metadata(&path).expect("downloaded file is missing");
+        assert_eq!(
+            downloaded.len(),
+            installer.size,
+            "downloaded size does not match the asset size"
+        );
+
+        // 清理，避免临时目录里堆积安装包。
+        let _ = std::fs::remove_file(&path);
+    }
+}
