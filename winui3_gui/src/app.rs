@@ -2,7 +2,7 @@ use parking_lot::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
-use app_core::controller::AppController;
+use app_core::controller::{AppController, StartBlock};
 use audio_core::device_watcher::DeviceWatcher;
 use audio_core::router::ChannelMode;
 use windows_reactor::*;
@@ -424,6 +424,7 @@ fn home_page(
     let is_running = c.is_running;
     let status_text = c.status_text.clone();
     let selected_source_id = c.selected_source.clone();
+    let start_block = c.start_block();
     drop(c);
 
     let channel_mode_items: Vec<String> = vec![
@@ -556,12 +557,46 @@ fn home_page(
             toggle_refresh();
         })
     } else {
-        button(i18n.t("Start")).accent().on_click(move || {
-            let mut c = toggle_controller.lock();
-            c.start_routing();
-            toggle_refresh();
-        })
+        button(i18n.t("Start"))
+            .accent()
+            .enabled(start_block.is_none())
+            .on_click(move || {
+                let mut c = toggle_controller.lock();
+                c.start_routing();
+                toggle_refresh();
+            })
     };
+
+    let batch_controller = Arc::clone(&controller);
+    let batch_refresh = make_setter.clone();
+    let batch_buttons = hstack((
+        Element::from(button(i18n.t("SelectAll")).on_click({
+            let controller = Arc::clone(&batch_controller);
+            let refresh = batch_refresh.clone();
+            move || {
+                controller.lock().set_all_outputs_enabled(true);
+                refresh();
+            }
+        })),
+        Element::from(button(i18n.t("ClearAll")).on_click({
+            let controller = Arc::clone(&batch_controller);
+            let refresh = batch_refresh.clone();
+            move || {
+                controller.lock().set_all_outputs_enabled(false);
+                refresh();
+            }
+        })),
+    ))
+    .spacing(8.0);
+
+    let start_hint = start_block.map(|block| {
+        let key = match block {
+            StartBlock::NoDevices => "StartHintNoDevices",
+            StartBlock::NoSource => "StartHintNoSource",
+            StartBlock::NoOutput => "StartHintNoOutput",
+        };
+        i18n.t(key).to_string()
+    });
 
     Element::from(
         vstack((
@@ -581,8 +616,20 @@ fn home_page(
             ),
             Element::from(text_block(i18n.t("SourceDevice")).bold()),
             Element::from(source_combo),
-            Element::from(text_block(i18n.t("OutputDevices")).bold()),
-            Element::from(vstack(output_items).spacing(4.0)),
+            Element::from(
+                hstack((
+                    Element::from(text_block(i18n.t("OutputDevices")).bold()),
+                    Element::from(batch_buttons),
+                ))
+                .spacing(12.0),
+            ),
+            Element::from(
+                scroll_viewer(vstack(output_items).spacing(4.0))
+                    .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto),
+            ),
+            Element::from(
+                text_block(start_hint.unwrap_or_else(|| status_text.clone())).font_size(13.0),
+            ),
             Element::from(
                 hstack((
                     Element::from(text_block(status_text)),
