@@ -94,10 +94,21 @@ fn default_true() -> bool {
 
 impl Default for Config {
     fn default() -> Self {
+        Self::default_with_language("en")
+    }
+}
+
+impl Config {
+    /// 生成一份默认配置，界面语言由调用方指定。
+    ///
+    /// 首次启动时调用方用系统 UI 语言填充（见
+    /// `app_core::i18n::detect_system_locale`）；`Config::default()`
+    /// 仍然用英文，保持既有语义。
+    pub fn default_with_language(language: &str) -> Self {
         Self {
             config_version: 1,
             general: General {
-                language: "en".to_string(),
+                language: language.to_string(),
                 auto_route: false,
                 minimized: false,
                 start_with_windows: false,
@@ -110,9 +121,7 @@ impl Default for Config {
             outputs: Vec::new(),
         }
     }
-}
 
-impl Config {
     /// 校验 config 加载后是否处于可接受的 schema 范围内。
     ///
     /// 1. `config_version` 必须匹配当前支持的主版本(目前 1),
@@ -149,6 +158,15 @@ impl ConfigManager {
     /// Load config from given base path (parent directory), or from default directory if None.
     /// If file does not exist, a default config is created and written.
     pub fn load(basepath: Option<PathBuf>) -> Result<Self> {
+        Self::load_with_default_language(basepath, "en")
+    }
+
+    /// Same as [`ConfigManager::load`], but the language of the freshly
+    /// created default config is taken from `language`.
+    ///
+    /// An already existing config file wins: the language the user picked in
+    /// the settings UI is never overwritten by the system language.
+    pub fn load_with_default_language(basepath: Option<PathBuf>, language: &str) -> Result<Self> {
         let config_dir = basepath.unwrap_or_else(default_config_dir);
         let config_path = config_dir.join("settings.toml");
 
@@ -166,7 +184,7 @@ impl ConfigManager {
             fs::create_dir_all(&config_dir)
                 .with_context(|| format!("creating config dir: {}", config_dir.display()))?;
 
-            let cfg = Config::default();
+            let cfg = Config::default_with_language(language);
             let toml_str = toml::to_string_pretty(&cfg).context("serializing default config")?;
             let mut f = fs::File::create(&config_path)
                 .with_context(|| format!("creating config file: {}", config_path.display()))?;
@@ -273,6 +291,38 @@ mod tests {
         let cfg = mgr.handle();
         let c = cfg.read();
         assert_eq!(c.config_version, 1);
+    }
+
+    #[test]
+    fn load_with_default_language_uses_given_language() {
+        let td = tempdir().unwrap();
+        let config_dir = td.path().to_path_buf();
+        let expected_config_path = config_dir.join("settings.toml");
+
+        let mgr = ConfigManager::load_with_default_language(Some(config_dir), "zh").expect("load");
+        assert_eq!(mgr.handle().read().general.language, "zh");
+
+        let s = fs::read_to_string(&expected_config_path).expect("read file");
+        assert!(s.contains("language = \"zh\""));
+    }
+
+    #[test]
+    fn existing_config_keeps_user_language() {
+        let td = tempdir().unwrap();
+        let config_dir = td.path().to_path_buf();
+        let expected_config_path = config_dir.join("settings.toml");
+
+        // 模拟"用户已经手动选过语言"的既有配置
+        let existing = Config::default_with_language("en");
+        fs::write(
+            &expected_config_path,
+            toml::to_string_pretty(&existing).expect("serialize"),
+        )
+        .expect("write file");
+
+        // 系统语言是中文，但既有配置优先，不能被覆盖
+        let mgr = ConfigManager::load_with_default_language(Some(config_dir), "zh").expect("load");
+        assert_eq!(mgr.handle().read().general.language, "en");
     }
 
     #[test]

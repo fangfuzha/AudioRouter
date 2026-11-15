@@ -45,6 +45,18 @@ client and writes to N render clients on a 3ms timer; see
 
 For end-user docs see `README.md`; for short-term todos see `TODO.md`.
 
+## Current Status (2026-11-16)
+
+First-launch language now follows the system UI language:
+
+- `app_core::i18n::detect_system_locale()` reads the user's UI language via
+  `GetUserDefaultUILanguage` — the same source Inno Setup uses with its default
+  `LanguageDetectionMethod=uilanguage` — and maps it to `zh` / `en`.
+- `ConfigManager::load_with_default_language()` applies that language **only**
+  when `settings.toml` does not exist yet. An existing config is never
+  rewritten, so a language picked in the settings UI survives restarts and
+  upgrades.
+
 ## Current Status (2026-11-10)
 
 Event-driven rework of the WinUI frontend:

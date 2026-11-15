@@ -7,6 +7,7 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 
 use app_core::controller::AppController;
+use app_core::i18n::detect_system_locale;
 use audio_core::router::Router;
 use config::ConfigManager;
 use windows_reactor::*;
@@ -236,7 +237,12 @@ fn main() -> windows_reactor::Result<()> {
     };
 
     let app_local_data_dir = app_config_dir();
-    let config_manager = ConfigManager::load(Some(app_local_data_dir)).expect("load config");
+    // 首次启动（settings.toml 尚不存在）时用系统 UI 语言生成默认设置；
+    // 已有配置文件和用户在设置页手动选择的语言都保持不变。
+    let default_language = detect_system_locale();
+    let config_manager =
+        ConfigManager::load_with_default_language(Some(app_local_data_dir), default_language)
+            .expect("load config");
     let router = Router::new();
     let controller = Arc::new(Mutex::new(AppController::new(config_manager, router)));
 
