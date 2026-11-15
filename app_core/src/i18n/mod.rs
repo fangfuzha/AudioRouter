@@ -136,4 +136,18 @@ mod tests {
             I18n::new(LOCALE_EN).t("Language")
         );
     }
+
+    /// 新增文案时最容易漏掉其中一种语言，这里把两个词表的 key 集合对齐。
+    #[test]
+    fn en_and_zh_maps_have_the_same_keys() {
+        use std::collections::BTreeSet;
+
+        let en_keys: BTreeSet<&str> = en::EN_MAP.iter().map(|(k, _)| *k).collect();
+        let zh_keys: BTreeSet<&str> = zh::ZH_MAP.iter().map(|(k, _)| *k).collect();
+
+        let missing_in_zh: Vec<&&str> = en_keys.difference(&zh_keys).collect();
+        let missing_in_en: Vec<&&str> = zh_keys.difference(&en_keys).collect();
+        assert!(missing_in_zh.is_empty(), "missing in zh: {missing_in_zh:?}");
+        assert!(missing_in_en.is_empty(), "missing in en: {missing_in_en:?}");
+    }
 }

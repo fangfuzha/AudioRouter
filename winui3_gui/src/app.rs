@@ -128,6 +128,12 @@ impl RootComponent {
             match cmd {
                 TrayCommand::ToggleWindow => window_utils::toggle_window(),
                 TrayCommand::ShowWindow => window_utils::show_and_focus_window(),
+                TrayCommand::StartRouting => {
+                    self.controller.lock().start_routing();
+                }
+                TrayCommand::StopRouting => {
+                    self.controller.lock().stop_routing();
+                }
                 TrayCommand::Quit => std::process::exit(0),
             }
         }
@@ -148,6 +154,9 @@ impl Component for RootComponent {
         // 这里每帧尝试，直到成功（成功后内部直接返回，开销可忽略）。
         window_utils::install_window_hooks();
         window_utils::restore_window_placement();
+        let start_minimized = self.controller.lock().start_minimized();
+        window_utils::set_start_hidden(start_minimized);
+        window_utils::apply_start_hidden();
 
         // 一次性副作用:在组件 mount 时向 Application.Resources 注入 Pane 背景
         // 覆盖资源,这样 NavigationView 的 Pane 背景才能在亮/暗主题下都正确。
@@ -205,6 +214,13 @@ impl Component for RootComponent {
         };
         cx.use_effect(close_to_tray_initial, move || {
             window_utils::set_close_to_tray(close_to_tray_initial);
+        });
+
+        let global_hotkey = self.controller.lock().global_hotkey();
+        cx.use_effect(global_hotkey.clone(), move || {
+            if let Err(error) = window_utils::configure_global_hotkey(&global_hotkey) {
+                log::warn!("Failed to register global hotkey: {error}");
+            }
         });
 
         // 启动时后台静默检查更新（受配置控制）
@@ -355,6 +371,13 @@ fn main_app(
     let nav_selected_for_handler = nav_selected.clone();
     let set_nav_selected_for_handler = set_nav_selected.clone();
     let controller_for_handler = Arc::clone(&controller);
+    // Ctrl+W 关闭窗口：挂在根元素上且不指定 ScopeOwner，
+    // 因此在窗口内容范围内全局生效（焦点在文本框等控件里时同样有效）。
+    let close_accel = KeyboardAccelerator::new(
+        VirtualKey::W,
+        VirtualKeyModifiers::Control,
+        window_utils::close_window,
+    );
     Element::from(
         NavigationView::new(nav_items, body)
             .selected_tag(&nav_selected)
@@ -381,6 +404,7 @@ fn main_app(
             .pane_open(pane_open)
             .open_pane_length(240.0),
     )
+    .keyboard_accelerator(close_accel)
 }
 
 fn home_page(
@@ -588,6 +612,7 @@ fn settings_page(
         auto_route,
         close_to_tray,
         auto_update_check,
+        global_hotkey,
         lang_index,
         theme_index,
         backdrop_index,
@@ -614,6 +639,7 @@ fn settings_page(
             draft.auto_route,
             draft.close_to_tray,
             draft.auto_update_check,
+            draft.global_hotkey.clone(),
             lang_idx,
             theme_idx,
             backdrop_idx,
@@ -646,7 +672,13 @@ fn settings_page(
     let save_btn = button(i18n.t("Save")).accent().on_click(move || {
         let mut c = save_controller.lock();
         let new_close_to_tray = c.draft_general.close_to_tray;
-        let lang_changed = c.save_general_config();
+        let lang_changed = match c.save_general_config() {
+            Ok(value) => value,
+            Err(error) => {
+                log::warn!("Failed to save general settings: {error}");
+                return;
+            }
+        };
         if lang_changed.is_some() {
             crate::tray::update_tray_language(&c.i18n);
         }
@@ -713,6 +745,17 @@ fn settings_page(
                                     move |checked| {
                                         let mut c = controller_clone.lock();
                                         c.draft_general.auto_update_check = checked;
+                                    }
+                                }),
+                        ),
+                        Element::from(
+                            text_box(global_hotkey)
+                                .header(i18n.t("GlobalHotkey"))
+                                .placeholder_text(i18n.t("HotkeyPlaceholder"))
+                                .on_text_changed({
+                                    let controller_clone = Arc::clone(&controller);
+                                    move |value| {
+                                        controller_clone.lock().draft_general.global_hotkey = value;
                                     }
                                 }),
                         ),

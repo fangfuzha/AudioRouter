@@ -9,6 +9,8 @@ use tray_icon::{
 /// 托盘运行时状态，保存在 thread_local 中以便运行时更新菜单文本。
 struct TrayState {
     show_item: MenuItem,
+    start_item: MenuItem,
+    stop_item: MenuItem,
     quit_item: MenuItem,
     tray_icon: TrayIcon,
 }
@@ -22,6 +24,8 @@ thread_local! {
 pub enum TrayCommand {
     ToggleWindow,
     ShowWindow,
+    StartRouting,
+    StopRouting,
     Quit,
 }
 
@@ -32,6 +36,8 @@ pub enum TrayCommand {
 #[derive(Clone)]
 pub struct TrayMenuIds {
     show: MenuId,
+    start: MenuId,
+    stop: MenuId,
     quit: MenuId,
 }
 
@@ -46,15 +52,21 @@ pub fn init_tray(i18n: I18n) -> anyhow::Result<()> {
     let icon = load_icon()?;
 
     let show_text = i18n.t("TrayShowHide").to_string();
+    let start_text = i18n.t("Start").to_string();
+    let stop_text = i18n.t("Stop").to_string();
     let quit_text = i18n.t("TrayQuit").to_string();
     let tooltip_text = i18n.t("AppTitle").to_string();
 
     let tray_menu = Menu::new();
     let show_item = MenuItem::new(&show_text, true, None);
+    let start_item = MenuItem::new(&start_text, true, None);
+    let stop_item = MenuItem::new(&stop_text, true, None);
     let quit_item = MenuItem::new(&quit_text, true, None);
     let separator = PredefinedMenuItem::separator();
 
     tray_menu.append(&show_item)?;
+    tray_menu.append(&start_item)?;
+    tray_menu.append(&stop_item)?;
     tray_menu.append(&separator)?;
     tray_menu.append(&quit_item)?;
 
@@ -68,6 +80,8 @@ pub fn init_tray(i18n: I18n) -> anyhow::Result<()> {
     TRAY_STATE.with(|s| {
         *s.borrow_mut() = Some(TrayState {
             show_item,
+            start_item,
+            stop_item,
             quit_item,
             tray_icon,
         });
@@ -81,6 +95,8 @@ pub fn update_tray_language(i18n: &I18n) {
     TRAY_STATE.with(|s| {
         if let Some(state) = s.borrow().as_ref() {
             state.show_item.set_text(i18n.t("TrayShowHide"));
+            state.start_item.set_text(i18n.t("Start"));
+            state.stop_item.set_text(i18n.t("Stop"));
             state.quit_item.set_text(i18n.t("TrayQuit"));
             let _ = state.tray_icon.set_tooltip(Some(i18n.t("AppTitle")));
         }
@@ -96,6 +112,8 @@ pub fn menu_item_ids() -> Option<TrayMenuIds> {
         let state = borrow.as_ref()?;
         Some(TrayMenuIds {
             show: state.show_item.id().clone(),
+            start: state.start_item.id().clone(),
+            stop: state.stop_item.id().clone(),
             quit: state.quit_item.id().clone(),
         })
     })
@@ -134,6 +152,10 @@ pub fn command_from_tray_event(event: &TrayIconEvent) -> Option<TrayCommand> {
 pub fn command_from_menu_event(event: &MenuEvent, ids: &TrayMenuIds) -> Option<TrayCommand> {
     if event.id == ids.show {
         Some(TrayCommand::ToggleWindow)
+    } else if event.id == ids.start {
+        Some(TrayCommand::StartRouting)
+    } else if event.id == ids.stop {
+        Some(TrayCommand::StopRouting)
     } else if event.id == ids.quit {
         Some(TrayCommand::Quit)
     } else {

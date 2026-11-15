@@ -245,6 +245,9 @@ fn main() -> windows_reactor::Result<()> {
             .expect("load config");
     let router = Router::new();
     let controller = Arc::new(Mutex::new(AppController::new(config_manager, router)));
+    if std::env::args().skip(1).any(|arg| arg == "--minimized") {
+        window_utils::set_start_hidden(true);
+    }
 
     {
         let mut c = controller.lock();
@@ -301,5 +304,7 @@ fn main() -> windows_reactor::Result<()> {
         log::warn!("Window icon not found: {}", icon_path.display());
     }
 
-    app.run(move || app::RootComponent::new(Arc::clone(&controller)))
+    let result = app.run(move || app::RootComponent::new(Arc::clone(&controller)));
+    window_utils::unregister_global_hotkey();
+    result
 }

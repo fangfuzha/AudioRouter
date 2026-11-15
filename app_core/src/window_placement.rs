@@ -27,6 +27,11 @@ pub struct WindowRect {
     pub top: i32,
     pub width: i32,
     pub height: i32,
+    /// 保存时窗口是否处于最大化状态。
+    ///
+    /// `left/top/width/height` 始终是“还原后”的正常尺寸，这样下次启动
+    /// 既能恢复大小，也能恢复最大化状态。
+    pub maximized: bool,
 }
 
 impl WindowRect {
@@ -99,7 +104,14 @@ fn save_window_placement_named(value_name: &str, rect: WindowRect) -> Result<()>
 
     let handle = open_key(KEY_READ | KEY_WRITE)?;
 
-    let value = format!("{},{},{},{}", rect.left, rect.top, rect.width, rect.height);
+    let value = format!(
+        "{},{},{},{},{}",
+        rect.left,
+        rect.top,
+        rect.width,
+        rect.height,
+        u8::from(rect.maximized)
+    );
     let wide_value = wide(&value);
     let bytes = unsafe {
         std::slice::from_raw_parts(wide_value.as_ptr() as *const u8, wide_value.len() * 2)
@@ -160,7 +172,10 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// 解析 "left,top,width,height" 格式。
+/// 解析 "left,top,width,height" 或 "left,top,width,height,maximized" 格式。
+///
+/// 第五段是后加的（用于记住最大化状态），旧版本写入的 4 段数据仍然可以
+/// 读取，此时按“未最大化”处理。
 fn parse_rect(text: &str) -> Option<WindowRect> {
     let mut parts = text.split(',');
     let mut next = || parts.next()?.trim().parse::<i32>().ok();
@@ -170,6 +185,11 @@ fn parse_rect(text: &str) -> Option<WindowRect> {
         top: next()?,
         width: next()?,
         height: next()?,
+        maximized: parts
+            .next()
+            .and_then(|v| v.trim().parse::<i32>().ok())
+            .map(|v| v != 0)
+            .unwrap_or(false),
     };
     if !rect.is_valid() {
         return None;
@@ -188,6 +208,15 @@ mod tests {
         assert_eq!(rect.top, 200);
         assert_eq!(rect.width, 800);
         assert_eq!(rect.height, 600);
+        assert!(!rect.maximized, "legacy 4-field value is not maximized");
+    }
+
+    #[test]
+    fn parses_maximized_flag() {
+        let rect = parse_rect("0,0,800,600,1").expect("parse");
+        assert!(rect.maximized);
+        let rect = parse_rect("0,0,800,600,0").expect("parse");
+        assert!(!rect.maximized);
     }
 
     #[test]
@@ -209,6 +238,7 @@ mod tests {
             top: 240,
             width: 1024,
             height: 768,
+            maximized: true,
         };
         save_window_placement_named(TEST_VALUE, rect).expect("save");
         let loaded = load_window_placement_named(TEST_VALUE).expect("load");

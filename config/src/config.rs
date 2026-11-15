@@ -30,6 +30,11 @@ pub struct General {
     pub close_to_tray: bool, // Whether closing the window minimizes to tray
     #[serde(default = "default_true")]
     pub auto_update_check: bool, // Whether to automatically check for updates on startup
+    /// 全局热键，用于显示/隐藏窗口；空字符串表示不注册。
+    ///
+    /// 格式如 `Ctrl+Alt+M`，由 `app_core::hotkey` 解析。
+    #[serde(default)]
+    pub global_hotkey: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -116,6 +121,7 @@ impl Config {
                 backdrop: Backdrop::default(),
                 close_to_tray: true,
                 auto_update_check: true,
+                global_hotkey: String::new(),
             },
             source_device_id: String::new(),
             outputs: Vec::new(),
@@ -265,6 +271,7 @@ mod tests {
                 backdrop: Backdrop::default(),
                 close_to_tray: true,
                 auto_update_check: true,
+                global_hotkey: String::new(),
             },
             source_device_id: "src1".to_string(),
             outputs: vec![Output {
