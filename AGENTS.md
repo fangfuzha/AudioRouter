@@ -45,6 +45,28 @@ client and writes to N render clients on a 3ms timer; see
 
 For end-user docs see `README.md`; for short-term todos see `TODO.md`.
 
+## Current Status (2026-11-17)
+
+Main window, settings page and tray got a usability pass (v0.3.13):
+
+- **Main window**: the status line became a semantic `InfoBar` (Ok / Warning /
+  Error), the source device combo shows a placeholder until a device is picked,
+  every output row has a **试听** button (plays a test tone on that device from
+  a background thread), the selected channel mode is spelled out under the row
+  instead of hiding in a tooltip, active outputs are marked "● 输出中", and the
+  header shows how many outputs are checked.
+- **Settings page**: the page scrolls, saving a bad global hotkey now shows an
+  inline `InfoBar` instead of failing silently, unsaved edits are flagged, and
+  a **诊断** section opens the config / log folders and shows the version.
+- **Tray**: a status line plus enabled/disabled start/stop entries and a
+  tooltip mirror the router state; the menu is only rewritten when the state
+  actually changes.
+- **Navigation**: the framework's own pane-toggle button has no event
+  callback, so it is hidden and replaced by a custom hamburger in
+  `pane_footer`; the expanded state is persisted in `settings.toml`.
+- **Background failures**: no balloon API in the tray, so a failed route
+  flashes the window (`FLASHW_ALL`) when the window is hidden.
+
 ## Current Status (2026-11-16)
 
 First-launch language now follows the system UI language:
@@ -172,6 +194,14 @@ Refactor pass complete. Key changes:
   repaint; its `AsyncSetState::call` marshals onto the UI thread. It is a
   no-op when the written value is unchanged, so always write a fresh
   counter value.
+- **`windows-reactor` reconciles unkeyed children by position.** A
+  `StackPanel` whose children have no `with_key()` is diffed index by index,
+  so inserting or removing a child in the *middle* shifts every later sibling
+  onto the wrong control — the UI then shows duplicated / missing sections.
+  Any list whose children come and go (conditional error bars, device rows,
+  empty-state hints) must give every child a stable `with_key()`. `Element::Empty`
+  and `Element::Group` are dropped / spliced before diffing, so they are not a
+  substitute for a key.
 - **CLI builds must be on Windows** — `windows-sys` and `windows`
   are pulled unconditionally; cross-compilation is not configured.
 

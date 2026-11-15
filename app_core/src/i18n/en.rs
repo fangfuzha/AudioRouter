@@ -144,4 +144,13 @@ pub const EN_MAP: &[(&str, &str)] = &[
     ("TrayStop", "Stop Routing"),
     ("TrayStatusRunning", "Running · {count} output(s)"),
     ("TrayStatusStopped", "Stopped"),
+    ("StatusTitleOk", "Running"),
+    ("StatusTitleWarning", "Attention"),
+    ("StatusTitleError", "Error"),
+    ("TestSoundPlaying", "Playing test tone on {device}..."),
+    ("TestSoundDone", "Test tone finished"),
+    ("TestSoundFailed", "Test tone failed: {error}"),
+    ("Outputting", "● Outputting"),
+    ("SaveFailed", "Failed to save settings: {error}"),
+    ("TogglePane", "Toggle sidebar"),
 ];

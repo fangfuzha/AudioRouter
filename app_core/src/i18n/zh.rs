@@ -111,4 +111,13 @@ pub const ZH_MAP: &[(&str, &str)] = &[
     ("TrayStop", "停止路由"),
     ("TrayStatusRunning", "运行中 · {count} 个输出"),
     ("TrayStatusStopped", "已停止"),
+    ("StatusTitleOk", "运行中"),
+    ("StatusTitleWarning", "注意"),
+    ("StatusTitleError", "错误"),
+    ("TestSoundPlaying", "正在向 {device} 播放提示音…"),
+    ("TestSoundDone", "试听结束"),
+    ("TestSoundFailed", "试听失败：{error}"),
+    ("Outputting", "● 输出中"),
+    ("SaveFailed", "保存设置失败：{error}"),
+    ("TogglePane", "折叠/展开侧栏"),
 ];

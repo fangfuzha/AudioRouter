@@ -8,11 +8,35 @@ use tray_icon::{
 
 /// 托盘运行时状态，保存在 thread_local 中以便运行时更新菜单文本。
 struct TrayState {
+    /// 状态行：显示当前是运行中还是已停止（禁用状态，不可点击）。
+    status_item: MenuItem,
     show_item: MenuItem,
     start_item: MenuItem,
     stop_item: MenuItem,
     quit_item: MenuItem,
     tray_icon: TrayIcon,
+    /// 最近一次的运行状态，语言切换后据此重建状态行文本。
+    running: bool,
+    output_count: usize,
+}
+
+/// 生成托盘状态行文本。
+fn status_text(i18n: &I18n, running: bool, output_count: usize) -> String {
+    if running {
+        i18n.t("TrayStatusRunning")
+            .replace("{count}", &output_count.to_string())
+    } else {
+        i18n.t("TrayStatusStopped").to_string()
+    }
+}
+
+/// 托盘 tooltip：应用名 + 当前状态。
+fn tooltip_text(i18n: &I18n, running: bool, output_count: usize) -> String {
+    format!(
+        "{} · {}",
+        i18n.t("AppTitle"),
+        status_text(i18n, running, output_count)
+    )
 }
 
 thread_local! {
@@ -52,18 +76,22 @@ pub fn init_tray(i18n: I18n) -> anyhow::Result<()> {
     let icon = load_icon()?;
 
     let show_text = i18n.t("TrayShowHide").to_string();
-    let start_text = i18n.t("Start").to_string();
-    let stop_text = i18n.t("Stop").to_string();
+    let start_text = i18n.t("TrayStart").to_string();
+    let stop_text = i18n.t("TrayStop").to_string();
     let quit_text = i18n.t("TrayQuit").to_string();
-    let tooltip_text = i18n.t("AppTitle").to_string();
+    let status_text = status_text(&i18n, false, 0);
+    let tooltip = tooltip_text(&i18n, false, 0);
 
     let tray_menu = Menu::new();
+    // 状态行放在最上面，禁用（不可点击），只用于展示当前状态。
+    let status_item = MenuItem::new(&status_text, false, None);
     let show_item = MenuItem::new(&show_text, true, None);
     let start_item = MenuItem::new(&start_text, true, None);
     let stop_item = MenuItem::new(&stop_text, true, None);
     let quit_item = MenuItem::new(&quit_text, true, None);
     let separator = PredefinedMenuItem::separator();
 
+    tray_menu.append(&status_item)?;
     tray_menu.append(&show_item)?;
     tray_menu.append(&start_item)?;
     tray_menu.append(&stop_item)?;
@@ -73,17 +101,20 @@ pub fn init_tray(i18n: I18n) -> anyhow::Result<()> {
     let tray_icon = TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu))
         .with_menu_on_left_click(false)
-        .with_tooltip(&tooltip_text)
+        .with_tooltip(&tooltip)
         .with_icon(icon)
         .build()?;
 
     TRAY_STATE.with(|s| {
         *s.borrow_mut() = Some(TrayState {
+            status_item,
             show_item,
             start_item,
             stop_item,
             quit_item,
             tray_icon,
+            running: false,
+            output_count: 0,
         });
     });
 
@@ -95,10 +126,36 @@ pub fn update_tray_language(i18n: &I18n) {
     TRAY_STATE.with(|s| {
         if let Some(state) = s.borrow().as_ref() {
             state.show_item.set_text(i18n.t("TrayShowHide"));
-            state.start_item.set_text(i18n.t("Start"));
-            state.stop_item.set_text(i18n.t("Stop"));
+            state.start_item.set_text(i18n.t("TrayStart"));
+            state.stop_item.set_text(i18n.t("TrayStop"));
             state.quit_item.set_text(i18n.t("TrayQuit"));
-            let _ = state.tray_icon.set_tooltip(Some(i18n.t("AppTitle")));
+            let status = status_text(i18n, state.running, state.output_count);
+            state.status_item.set_text(&status);
+            let _ = state.tray_icon.set_tooltip(Some(&tooltip_text(
+                i18n,
+                state.running,
+                state.output_count,
+            )));
+        }
+    });
+}
+
+/// 同步托盘里的运行状态：状态行、启停可用性和 tooltip。
+///
+/// 托盘常驻时用户看不到主界面，状态必须在这里也可见。
+pub fn update_tray_status(i18n: &I18n, running: bool, output_count: usize) {
+    TRAY_STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            state.running = running;
+            state.output_count = output_count;
+            // 运行中不能重复启动，已停止时不能重复停止。
+            state.start_item.set_enabled(!running);
+            state.stop_item.set_enabled(running);
+            let status = status_text(i18n, running, output_count);
+            state.status_item.set_text(&status);
+            let _ = state
+                .tray_icon
+                .set_tooltip(Some(&tooltip_text(i18n, running, output_count)));
         }
     });
 }

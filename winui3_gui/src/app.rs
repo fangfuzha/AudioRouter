@@ -2,7 +2,7 @@ use parking_lot::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
-use app_core::controller::{AppController, StartBlock};
+use app_core::controller::{AppController, StartBlock, StatusLevel};
 use audio_core::device_watcher::DeviceWatcher;
 use audio_core::router::ChannelMode;
 use windows_reactor::*;
@@ -93,6 +93,8 @@ pub struct RootComponent {
     device_watcher: Arc<Mutex<Option<DeviceWatcher>>>,
     /// 更新检查状态（后台线程写入，UI 线程读取）。
     update_state: Arc<Mutex<UpdateState>>,
+    /// 上一次同步到托盘的运行状态，避免每帧都去写托盘菜单。
+    tray_status: Arc<Mutex<Option<(bool, usize)>>>,
 }
 
 impl RootComponent {
@@ -103,6 +105,7 @@ impl RootComponent {
             pending: Arc::new(Mutex::new(PendingEvents::default())),
             device_watcher: Arc::new(Mutex::new(None)),
             update_state: Arc::new(Mutex::new(UpdateState::Idle)),
+            tray_status: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -120,6 +123,13 @@ impl RootComponent {
         if router_dirty {
             let mut c = self.controller.lock();
             c.poll_router_events();
+            let failed = c.status_level == StatusLevel::Error;
+            drop(c);
+            if failed {
+                // 路由在后台失败时，若窗口已隐藏到托盘，界面上的提示根本看不到，
+                // 闪烁任务栏图标提醒用户。
+                window_utils::flash_window_if_hidden();
+            }
         }
 
         // 托盘命令必须在 UI 线程执行：SetForegroundWindow 等调用
@@ -155,6 +165,24 @@ impl Component for RootComponent {
 
         // 先把后台线程投递的事件应用掉（UI 线程）。
         self.apply_pending_events();
+
+        // 托盘常驻时主界面看不到，状态必须同步到托盘（状态行 / 启停可用性 /
+        // tooltip）。只在状态变化时写一次，避免每帧都动托盘菜单。
+        {
+            let (running, count, i18n) = {
+                let c = self.controller.lock();
+                (c.is_running, c.enabled_output_ids().len(), c.i18n.clone())
+            };
+            let changed = {
+                let mut cache = self.tray_status.lock();
+                let changed = cache.map(|c| c != (running, count)).unwrap_or(true);
+                *cache = Some((running, count));
+                changed
+            };
+            if changed {
+                crate::tray::update_tray_status(&i18n, running, count);
+            }
+        }
 
         // 窗口钩子与位置恢复：WinUI 的窗口标题在首帧之后才就绪，
         // 这里每帧尝试，直到成功（成功后内部直接返回，开销可忽略）。
@@ -193,6 +221,8 @@ impl Component for RootComponent {
         };
         let (nav_expanded, set_nav_expanded) = cx.use_state(initial_expanded);
         let (nav_selected, set_nav_selected) = cx.use_state(NAV_TAG_HOME.to_string());
+        // 设置页的内联错误提示（保存失败 / 热键被占用等）。
+        let (settings_error, set_settings_error) = cx.use_state(None::<String>);
 
         let (theme_choice, set_theme_choice) = cx.use_state(ThemeChoice::FollowSystem);
         cx.use_effect((), || {
@@ -292,6 +322,8 @@ impl Component for RootComponent {
             theme_choice,
             set_theme_choice,
             Arc::clone(&self.update_state),
+            settings_error,
+            set_settings_error,
         )
     }
 }
@@ -307,6 +339,8 @@ fn main_app(
     theme_choice: ThemeChoice,
     set_theme_choice: SetState<ThemeChoice>,
     update_state: Arc<Mutex<UpdateState>>,
+    settings_error: Option<String>,
+    set_settings_error: SetState<Option<String>>,
 ) -> Element {
     let c = controller.lock();
     let i18n = c.i18n.clone();
@@ -354,6 +388,8 @@ fn main_app(
             theme_choice,
             set_theme_choice,
             Arc::clone(&update_state),
+            settings_error.clone(),
+            set_settings_error.clone(),
         )
     } else {
         home_page(Arc::clone(&controller), i18n.clone(), make_setter.clone())
@@ -367,7 +403,27 @@ fn main_app(
     // 后框架内部切换的 IsPaneOpen 状态。框架自行管理展开/收起，Rust 侧
     // 只提供初始值。
     let pane_open = nav_expanded;
-    let _ = set_nav_expanded;
+
+    // 框架自带的折叠按钮没有事件回调，无法感知用户点击，也就无法把展开状态
+    // 持久化。这里隐藏自带按钮，改用侧栏底部的自定义按钮：点击后立刻写入
+    // 配置，下次启动沿用上次的展开状态。
+    let toggle_controller = Arc::clone(&controller);
+    let set_nav_expanded_for_toggle = set_nav_expanded.clone();
+    let current_expanded = nav_expanded;
+    let pane_toggle = Element::from(
+        button("")
+            // Segoe Fluent Icons 的 E700 是「全局导航」汉堡图标。
+            .icon(Icon::font_family("\u{E700}", "Segoe Fluent Icons"))
+            .on_click(move || {
+                let next = !current_expanded;
+                {
+                    let mut c = toggle_controller.lock();
+                    c.set_nav_pane_expanded(next);
+                }
+                set_nav_expanded_for_toggle.call(next);
+            }),
+    )
+    .tooltip(i18n.t("TogglePane"));
 
     // 内置 SettingsItem 点击时 Tag 为 null，提取链返回空字符串。
     // 用排除法：tag == NAV_TAG_HOME → 首页；tag == NAV_TAG_GITHUB → 打开
@@ -408,6 +464,8 @@ fn main_app(
             .pane_title("AudioRouter")
             .pane_display_mode(NavigationViewPaneDisplayMode::Left)
             .pane_open(pane_open)
+            .pane_toggle_button_visible(false)
+            .pane_footer(pane_toggle)
             .open_pane_length(240.0),
     )
     .keyboard_accelerator(close_accel)
@@ -423,8 +481,10 @@ fn home_page(
     let output_devices: Vec<_> = c.filtered_target_devices().into_iter().cloned().collect();
     let is_running = c.is_running;
     let status_text = c.status_text.clone();
+    let status_level = c.status_level;
     let selected_source_id = c.selected_source.clone();
     let start_block = c.start_block();
+    let enabled_output_count = c.enabled_output_ids().len();
     drop(c);
 
     let channel_mode_items: Vec<String> = vec![
@@ -466,6 +526,8 @@ fn home_page(
         let devices = source_devices.clone();
         ComboBox::new(source_device_names)
             .selected_index(selected_source_index)
+            // 未选择源设备时显示占位提示，而不是一个空白下拉框。
+            .placeholder_text(i18n.t("SourcePlaceholder"))
             .on_selection_changed(move |index| {
                 if let Some(device) = devices.get(index as usize) {
                     let mut c = controller_clone.lock();
@@ -501,10 +563,54 @@ fn home_page(
                 .cloned()
                 .unwrap_or_default();
 
-            // 使用 Grid + 三列 [Auto, Star, Auto] 让 ComboBox 右对齐:
-            // hstack 不会拉伸子元素,而 Grid 的 Star 列可占据剩余空间,
-            // 把第三列(ComboBox)推到行末。
-            Element::from(
+            // 试听按钮：在该设备上播放一段提示音，用来确认「哪个是哪个音箱」。
+            // 播放是阻塞操作，放到后台线程执行，结果回写到状态通道。
+            let test_button = {
+                let controller_clone = Arc::clone(&controller);
+                let refresh = make_setter.clone();
+                let device_id = device_id.clone();
+                let device_name = device.friendly_name.clone();
+                button(i18n.t("TestSound")).subtle().on_click(move || {
+                    let controller = Arc::clone(&controller_clone);
+                    let refresh = refresh.clone();
+                    let device_id = device_id.clone();
+                    let device_name = device_name.clone();
+                    std::thread::spawn(move || {
+                        {
+                            let mut c = controller.lock();
+                            let text = c
+                                .i18n
+                                .t("TestSoundPlaying")
+                                .replace("{device}", &device_name);
+                            c.set_status(StatusLevel::Idle, text);
+                        }
+                        refresh();
+
+                        let result = audio_core::test_tone::play(&device_id);
+                        {
+                            let mut c = controller.lock();
+                            match result {
+                                Ok(()) => {
+                                    let text = c.i18n.t("TestSoundDone").to_string();
+                                    c.set_status(StatusLevel::Ok, text);
+                                }
+                                Err(e) => {
+                                    let text = c
+                                        .i18n
+                                        .t("TestSoundFailed")
+                                        .replace("{error}", &e.to_string());
+                                    c.set_status(StatusLevel::Error, text);
+                                }
+                            }
+                        }
+                        refresh();
+                    });
+                })
+            };
+
+            // 使用 Grid + 四列 [Auto, Star, Auto, Auto]：Star 列占据剩余空间，
+            // 把声道模式下拉框和试听按钮推到行末。
+            let row = Element::from(
                 grid((
                     Element::from({
                         let controller_clone = Arc::clone(&controller);
@@ -539,12 +645,37 @@ fn home_page(
                                 refresh();
                             })
                     })
-                    .tooltip(selected_desc)
+                    .tooltip(selected_desc.clone())
                     .grid_column(2),
+                    Element::from(test_button).grid_column(3),
                 ))
-                .columns([GridLength::Auto, GridLength::STAR, GridLength::Auto])
+                .columns([
+                    GridLength::Auto,
+                    GridLength::STAR,
+                    GridLength::Auto,
+                    GridLength::Auto,
+                ])
                 .column_spacing(12.0),
-            )
+            );
+
+            // 声道模式说明常驻显示在设备行下方：tooltip 只有鼠标悬停时才可见，
+            // 第一次使用时很难注意到。
+            let mut details: Vec<Element> = vec![Element::from(
+                text_block(selected_desc).font_size(12.0).opacity(0.7),
+            )];
+            // 正在接收音频的输出设备给一个显式标记，
+            // 避免「勾了但没声音」时无从判断是哪个设备在工作。
+            if is_running && enabled {
+                details.push(Element::from(
+                    text_block(i18n.t("Outputting")).font_size(12.0),
+                ));
+            }
+
+            // 设备列表会随热插拔增减，给每一行一个稳定的 key：
+            // 框架对无 key 的兄弟节点按位置复用控件，列表一变长就会
+            // 把不同设备的行错配到别的设备上。
+            Element::from(vstack((row, vstack(details).spacing(2.0))).spacing(2.0))
+                .with_key(format!("home.output.{device_id}"))
         })
         .collect();
 
@@ -598,55 +729,102 @@ fn home_page(
         i18n.t(key).to_string()
     });
 
-    Element::from(
-        vstack((
-            Element::from(
-                hstack((
-                    Element::from(title(i18n.t("AppTitle"))),
-                    Element::from(
-                        text_block(if is_running {
-                            i18n.t("Running")
-                        } else {
-                            i18n.t("StatusReady")
-                        })
-                        .font_size(13.0),
-                    ),
-                ))
-                .spacing(12.0),
-            ),
-            Element::from(text_block(i18n.t("SourceDevice")).bold()),
-            Element::from(source_combo),
-            Element::from(
-                hstack((
-                    Element::from(text_block(i18n.t("OutputDevices")).bold()),
-                    Element::from(batch_buttons),
-                ))
-                .spacing(12.0),
-            ),
-            Element::from(
-                scroll_viewer(vstack(output_items).spacing(4.0))
-                    .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto),
-            ),
-            Element::from(
-                text_block(start_hint.unwrap_or_else(|| status_text.clone())).font_size(13.0),
-            ),
-            Element::from(
-                hstack((
-                    Element::from(text_block(status_text)),
-                    Element::from(toggle_btn),
-                ))
-                .spacing(12.0)
-                .horizontal_alignment(HorizontalAlignment::Right),
-            ),
-        ))
-        .spacing(8.0)
-        .padding(Thickness {
-            left: 16.0,
-            top: 12.0,
-            right: 16.0,
-            bottom: 16.0,
-        }),
-    )
+    // 状态提示条：按语义级别显示成 InfoBar，比一行灰色小字更容易被注意到。
+    // Idle 级别（就绪、设备列表已更新等）不打扰用户，用一行小字即可。
+    let status_bar: Option<Element> = match status_level {
+        StatusLevel::Idle => None,
+        StatusLevel::Ok => Some(Element::from(
+            InfoBar::new(i18n.t("StatusTitleOk"))
+                .message(status_text.clone())
+                .severity(InfoBarSeverity::Success)
+                .is_closable(false),
+        )),
+        StatusLevel::Warning => Some(Element::from(
+            InfoBar::new(i18n.t("StatusTitleWarning"))
+                .message(status_text.clone())
+                .severity(InfoBarSeverity::Warning)
+                .is_closable(false),
+        )),
+        StatusLevel::Error => Some(Element::from(
+            InfoBar::new(i18n.t("StatusTitleError"))
+                .message(status_text.clone())
+                .severity(InfoBarSeverity::Error)
+                .is_closable(false),
+        )),
+    };
+
+    // 首页的子节点数量会随「启动前置条件提示」「状态提示条」变化。
+    // 框架默认按位置复用控件，位置一变后面所有控件都会错位，
+    // 所以这里给每个兄弟节点一个稳定的 key，改走 keyed 差分。
+    let mut page: Vec<Element> = Vec::new();
+    page.push(
+        Element::from(
+            hstack((
+                Element::from(title(i18n.t("AppTitle"))),
+                Element::from(
+                    text_block(if is_running {
+                        i18n.t("Running")
+                    } else {
+                        i18n.t("StatusReady")
+                    })
+                    .font_size(13.0),
+                ),
+            ))
+            .spacing(12.0),
+        )
+        .with_key("home.title"),
+    );
+    page.push(Element::from(text_block(i18n.t("SourceDevice")).bold()).with_key("home.source"));
+    page.push(Element::from(source_combo).with_key("home.source_combo"));
+    page.push(
+        Element::from(
+            hstack((
+                Element::from(text_block(i18n.t("OutputDevices")).bold()),
+                Element::from(
+                    text_block(
+                        i18n.t("SelectedOutputs")
+                            .replace("{count}", &enabled_output_count.to_string()),
+                    )
+                    .font_size(12.0)
+                    .opacity(0.7),
+                ),
+                Element::from(batch_buttons),
+            ))
+            .spacing(12.0),
+        )
+        .with_key("home.outputs_header"),
+    );
+    page.push(
+        Element::from(
+            scroll_viewer(vstack(output_items).spacing(4.0))
+                .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto),
+        )
+        .with_key("home.outputs"),
+    );
+    if let Some(hint) = start_hint {
+        page.push(Element::from(text_block(hint).font_size(13.0)).with_key("home.start_hint"));
+    }
+    if let Some(bar) = status_bar {
+        page.push(bar.with_key("home.status"));
+    } else if !status_text.is_empty() {
+        page.push(
+            Element::from(text_block(status_text.clone()).font_size(12.0).opacity(0.7))
+                .with_key("home.status"),
+        );
+    }
+    page.push(
+        Element::from(
+            hstack((Element::from(toggle_btn),)).horizontal_alignment(HorizontalAlignment::Right),
+        )
+        .with_key("home.actions"),
+    );
+
+    Element::from(vstack(page).spacing(8.0).padding(Thickness {
+        left: 16.0,
+        top: 12.0,
+        right: 16.0,
+        bottom: 16.0,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -658,6 +836,8 @@ fn settings_page(
     theme_choice: ThemeChoice,
     set_theme_choice: SetState<ThemeChoice>,
     update_state: Arc<Mutex<UpdateState>>,
+    settings_error: Option<String>,
+    set_settings_error: SetState<Option<String>>,
 ) -> Element {
     let (
         start_with_windows,
@@ -699,6 +879,12 @@ fn settings_page(
         )
     };
 
+    // 草稿与已保存配置是否一致：不一致说明有未保存的修改。
+    let dirty = {
+        let c = controller.lock();
+        c.settings_dirty()
+    };
+
     let lang_items = vec!["English".to_string(), "简体中文".to_string()];
     let theme_items = vec![
         i18n.t("ThemeFollowSystem").to_string(),
@@ -722,13 +908,31 @@ fn settings_page(
     let save_controller = Arc::clone(&controller);
     let save_refresh = make_setter.clone();
     let save_nav = set_nav_selected.clone();
+    let set_error = set_settings_error.clone();
+    let save_i18n = i18n.clone();
     let save_btn = button(i18n.t("Save")).accent().on_click(move || {
         let mut c = save_controller.lock();
+
+        // 先单独校验全局热键，给出明确的格式错误提示，
+        // 而不是笼统的「保存失败」。
+        let hotkey_input = c.draft_general.global_hotkey.trim().to_string();
+        if !hotkey_input.is_empty() {
+            if let Err(error) = app_core::hotkey::parse(&hotkey_input) {
+                let text = save_i18n
+                    .t("HotkeyInvalid")
+                    .replace("{error}", &error.to_string());
+                set_error.call(Some(text));
+                return;
+            }
+        }
+
         let new_close_to_tray = c.draft_general.close_to_tray;
         let lang_changed = match c.save_general_config() {
             Ok(value) => value,
             Err(error) => {
                 log::warn!("Failed to save general settings: {error}");
+                let text = save_i18n.t("SaveFailed").replace("{error}", &error);
+                set_error.call(Some(text));
                 return;
             }
         };
@@ -736,189 +940,291 @@ fn settings_page(
             crate::tray::update_tray_language(&c.i18n);
         }
         window_utils::set_close_to_tray(new_close_to_tray);
+
+        // 热键立即生效：注销旧的、注册新的。
+        // 被其他程序占用时保留旧热键，并把原因显示在设置页里。
         let hotkey = c.global_hotkey();
         if let Err(error) = window_utils::configure_global_hotkey(&hotkey) {
             log::warn!("Failed to apply global hotkey immediately: {error}");
+            set_error.call(Some(save_i18n.t("HotkeyInUse").to_string()));
+            save_refresh();
+            return;
         }
+
+        set_error.call(None);
         save_refresh();
         save_nav.call(NAV_TAG_HOME.to_string());
     });
 
-    Element::from(
-        vstack((
-            Element::from(title(i18n.t("SettingsTitle"))),
+    // 设置页同样给每个兄弟节点一个稳定的 key：错误提示和「有未保存的修改」
+    // 是按条件插入的，没有 key 时框架会按位置复用控件，导致后面的
+    // 选项卡片和按钮被挤到错位的位置。
+    let mut page: Vec<Element> = Vec::new();
+    page.push(Element::from(title(i18n.t("SettingsTitle"))).with_key("settings.title"));
+
+    // 保存失败 / 热键被占用的内联错误提示，不再静默失败。
+    if let Some(error) = settings_error.as_ref() {
+        page.push(
             Element::from(
-                border(
-                    vstack((
+                InfoBar::new(i18n.t("StatusTitleError"))
+                    .message(error.clone())
+                    .severity(InfoBarSeverity::Error)
+                    .is_closable(false),
+            )
+            .with_key("settings.error"),
+        );
+    }
+
+    // 有未保存的修改时给出提示，避免改了一半切走就丢了。
+    if dirty {
+        page.push(
+            Element::from(
+                text_block(i18n.t("UnsavedChanges"))
+                    .font_size(12.0)
+                    .opacity(0.7),
+            )
+            .with_key("settings.dirty"),
+        );
+    }
+
+    page.push(Element::from(
+        border(
+            vstack((
+                Element::from(
+                    check_box(start_with_windows)
+                        .content(i18n.t("StartWithWindows"))
+                        .on_checked({
+                            let controller_clone = Arc::clone(&controller);
+                            move |checked| {
+                                let mut c = controller_clone.lock();
+                                c.draft_general.start_with_windows = checked;
+                            }
+                        }),
+                ),
+                Element::from(
+                    check_box(start_minimized)
+                        .content(i18n.t("StartMinimized"))
+                        .on_checked({
+                            let controller_clone = Arc::clone(&controller);
+                            move |checked| {
+                                let mut c = controller_clone.lock();
+                                c.draft_general.minimized = checked;
+                            }
+                        }),
+                ),
+                Element::from(
+                    check_box(auto_route)
+                        .content(i18n.t("AutoRoute"))
+                        .on_checked({
+                            let controller_clone = Arc::clone(&controller);
+                            move |checked| {
+                                let mut c = controller_clone.lock();
+                                c.draft_general.auto_route = checked;
+                            }
+                        }),
+                ),
+                Element::from(
+                    check_box(close_to_tray)
+                        .content(i18n.t("CloseToTray"))
+                        .on_checked({
+                            let controller_clone = Arc::clone(&controller);
+                            move |checked| {
+                                let mut c = controller_clone.lock();
+                                c.draft_general.close_to_tray = checked;
+                            }
+                        }),
+                ),
+                Element::from(
+                    check_box(auto_update_check)
+                        .content(i18n.t("AutoUpdateCheck"))
+                        .on_checked({
+                            let controller_clone = Arc::clone(&controller);
+                            move |checked| {
+                                let mut c = controller_clone.lock();
+                                c.draft_general.auto_update_check = checked;
+                            }
+                        }),
+                ),
+                Element::from(
+                    text_box(global_hotkey)
+                        .header(i18n.t("GlobalHotkey"))
+                        .placeholder_text(i18n.t("HotkeyPlaceholder"))
+                        .on_text_changed({
+                            let controller_clone = Arc::clone(&controller);
+                            move |value| {
+                                controller_clone.lock().draft_general.global_hotkey = value;
+                            }
+                        }),
+                ),
+                Element::from(
+                    hstack((
+                        Element::from(text_block(i18n.t("Language"))),
                         Element::from(
-                            check_box(start_with_windows)
-                                .content(i18n.t("StartWithWindows"))
-                                .on_checked({
+                            ComboBox::new(lang_items)
+                                .selected_index(lang_index)
+                                .on_selection_changed({
                                     let controller_clone = Arc::clone(&controller);
-                                    move |checked| {
+                                    move |index| {
                                         let mut c = controller_clone.lock();
-                                        c.draft_general.start_with_windows = checked;
+                                        c.draft_general.language = match index {
+                                            1 => "zh".to_string(),
+                                            _ => "en".to_string(),
+                                        };
                                     }
                                 }),
-                        ),
-                        Element::from(
-                            check_box(start_minimized)
-                                .content(i18n.t("StartMinimized"))
-                                .on_checked({
-                                    let controller_clone = Arc::clone(&controller);
-                                    move |checked| {
-                                        let mut c = controller_clone.lock();
-                                        c.draft_general.minimized = checked;
-                                    }
-                                }),
-                        ),
-                        Element::from(
-                            check_box(auto_route)
-                                .content(i18n.t("AutoRoute"))
-                                .on_checked({
-                                    let controller_clone = Arc::clone(&controller);
-                                    move |checked| {
-                                        let mut c = controller_clone.lock();
-                                        c.draft_general.auto_route = checked;
-                                    }
-                                }),
-                        ),
-                        Element::from(
-                            check_box(close_to_tray)
-                                .content(i18n.t("CloseToTray"))
-                                .on_checked({
-                                    let controller_clone = Arc::clone(&controller);
-                                    move |checked| {
-                                        let mut c = controller_clone.lock();
-                                        c.draft_general.close_to_tray = checked;
-                                    }
-                                }),
-                        ),
-                        Element::from(
-                            check_box(auto_update_check)
-                                .content(i18n.t("AutoUpdateCheck"))
-                                .on_checked({
-                                    let controller_clone = Arc::clone(&controller);
-                                    move |checked| {
-                                        let mut c = controller_clone.lock();
-                                        c.draft_general.auto_update_check = checked;
-                                    }
-                                }),
-                        ),
-                        Element::from(
-                            text_box(global_hotkey)
-                                .header(i18n.t("GlobalHotkey"))
-                                .placeholder_text(i18n.t("HotkeyPlaceholder"))
-                                .on_text_changed({
-                                    let controller_clone = Arc::clone(&controller);
-                                    move |value| {
-                                        controller_clone.lock().draft_general.global_hotkey = value;
-                                    }
-                                }),
-                        ),
-                        Element::from(
-                            hstack((
-                                Element::from(text_block(i18n.t("Language"))),
-                                Element::from(
-                                    ComboBox::new(lang_items)
-                                        .selected_index(lang_index)
-                                        .on_selection_changed({
-                                            let controller_clone = Arc::clone(&controller);
-                                            move |index| {
-                                                let mut c = controller_clone.lock();
-                                                c.draft_general.language = match index {
-                                                    1 => "zh".to_string(),
-                                                    _ => "en".to_string(),
-                                                };
-                                            }
-                                        }),
-                                ),
-                            ))
-                            .spacing(8.0),
-                        ),
-                        Element::from(
-                            hstack((
-                                Element::from(text_block(i18n.t("Theme"))),
-                                Element::from(
-                                    ComboBox::new(theme_items)
-                                        .selected_index(theme_index)
-                                        .on_selection_changed(move |index| {
-                                            let choice = match index {
-                                                1 => ThemeChoice::Light,
-                                                2 => ThemeChoice::Dark,
-                                                _ => ThemeChoice::FollowSystem,
-                                            };
-                                            apply_theme(choice);
-                                            set_theme_choice.call(choice);
-                                        }),
-                                ),
-                            ))
-                            .spacing(8.0),
-                        ),
-                        Element::from(
-                            hstack((
-                                Element::from(text_block(i18n.t("Backdrop"))),
-                                Element::from(
-                                    ComboBox::new(backdrop_items)
-                                        .selected_index(backdrop_index)
-                                        .on_selection_changed({
-                                            let controller_clone = Arc::clone(&controller);
-                                            move |index| {
-                                                let mut c = controller_clone.lock();
-                                                let bd = match index {
-                                                    1 => config::config::Backdrop::MicaAlt,
-                                                    2 => config::config::Backdrop::Acrylic,
-                                                    _ => config::config::Backdrop::Mica,
-                                                };
-                                                c.draft_general.backdrop = bd;
-                                                // 实时应用 backdrop 以便预览效果
-                                                use windows_reactor::Backdrop as WrBackdrop;
-                                                let wr_bd = match bd {
-                                                    config::config::Backdrop::Mica => {
-                                                        WrBackdrop::Mica
-                                                    }
-                                                    config::config::Backdrop::MicaAlt => {
-                                                        WrBackdrop::MicaAlt
-                                                    }
-                                                    config::config::Backdrop::Acrylic => {
-                                                        WrBackdrop::Acrylic
-                                                    }
-                                                };
-                                                windows_reactor::set_backdrop(Some(wr_bd));
-                                            }
-                                        }),
-                                ),
-                            ))
-                            .spacing(8.0),
                         ),
                     ))
-                    .spacing(14.0),
-                )
-                .padding(Thickness::uniform(16.0))
-                .background(ThemeRef::LayerFill)
-                .corner_radius(8.0),
-            ),
-            #[allow(clippy::useless_conversion)]
-            Element::from(build_update_section(
-                Arc::clone(&update_state),
-                i18n.clone(),
-                make_setter.clone(),
-            )),
-            #[allow(clippy::useless_conversion)]
-            Element::from(
-                hstack((Element::from(cancel_btn), Element::from(save_btn)))
-                    .spacing(8.0)
-                    .horizontal_alignment(HorizontalAlignment::Right),
-            ),
+                    .spacing(8.0),
+                ),
+                Element::from(
+                    hstack((
+                        Element::from(text_block(i18n.t("Theme"))),
+                        Element::from(
+                            ComboBox::new(theme_items)
+                                .selected_index(theme_index)
+                                .on_selection_changed(move |index| {
+                                    let choice = match index {
+                                        1 => ThemeChoice::Light,
+                                        2 => ThemeChoice::Dark,
+                                        _ => ThemeChoice::FollowSystem,
+                                    };
+                                    apply_theme(choice);
+                                    set_theme_choice.call(choice);
+                                }),
+                        ),
+                    ))
+                    .spacing(8.0),
+                ),
+                Element::from(
+                    hstack((
+                        Element::from(text_block(i18n.t("Backdrop"))),
+                        Element::from(
+                            ComboBox::new(backdrop_items)
+                                .selected_index(backdrop_index)
+                                .on_selection_changed({
+                                    let controller_clone = Arc::clone(&controller);
+                                    move |index| {
+                                        let mut c = controller_clone.lock();
+                                        let bd = match index {
+                                            1 => config::config::Backdrop::MicaAlt,
+                                            2 => config::config::Backdrop::Acrylic,
+                                            _ => config::config::Backdrop::Mica,
+                                        };
+                                        c.draft_general.backdrop = bd;
+                                        // 实时应用 backdrop 以便预览效果
+                                        use windows_reactor::Backdrop as WrBackdrop;
+                                        let wr_bd = match bd {
+                                            config::config::Backdrop::Mica => WrBackdrop::Mica,
+                                            config::config::Backdrop::MicaAlt => {
+                                                WrBackdrop::MicaAlt
+                                            }
+                                            config::config::Backdrop::Acrylic => {
+                                                WrBackdrop::Acrylic
+                                            }
+                                        };
+                                        windows_reactor::set_backdrop(Some(wr_bd));
+                                    }
+                                }),
+                        ),
+                    ))
+                    .spacing(8.0),
+                ),
+            ))
+            .spacing(14.0),
+        )
+        .padding(Thickness::uniform(16.0))
+        .background(ThemeRef::LayerFill)
+        .corner_radius(8.0)
+        .with_key("settings.general"),
+    ));
+
+    #[allow(clippy::useless_conversion)]
+    page.push(
+        Element::from(build_update_section(
+            Arc::clone(&update_state),
+            i18n.clone(),
+            make_setter.clone(),
         ))
-        .spacing(12.0)
-        .padding(Thickness {
+        .with_key("settings.update"),
+    );
+
+    #[allow(clippy::useless_conversion)]
+    page.push(Element::from(build_diagnostics_section(&i18n)).with_key("settings.diagnostics"));
+
+    page.push(
+        Element::from(
+            hstack((Element::from(cancel_btn), Element::from(save_btn)))
+                .spacing(8.0)
+                .horizontal_alignment(HorizontalAlignment::Right),
+        )
+        .with_key("settings.actions"),
+    );
+
+    // 设置页内容较长（选项 + 更新 + 诊断），整体放进滚动容器，
+    // 窗口不够高时也能滚到下面的内容。
+    Element::from(
+        scroll_viewer(vstack(page).spacing(12.0).padding(Thickness {
             left: 16.0,
             top: 12.0,
             right: 16.0,
             bottom: 16.0,
-        }),
+        }))
+        .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto),
     )
+}
+
+/// 构建设置页里的诊断区域：打开配置目录 / 日志目录，并显示当前版本号。
+///
+/// 出问题时用户不用自己去翻应用数据目录。
+fn build_diagnostics_section(i18n: &app_core::i18n::I18n) -> Element {
+    let config_dir = crate::app_config_dir();
+    let log_dir = config_dir.join("logs");
+    let version = crate::update::current_version();
+
+    let open_config = button(i18n.t("OpenConfigFolder")).on_click({
+        let path = config_dir.clone();
+        move || open_folder_in_explorer(&path)
+    });
+    let open_logs = button(i18n.t("OpenLogFolder")).on_click({
+        let path = log_dir.clone();
+        move || open_folder_in_explorer(&path)
+    });
+
+    Element::from(
+        border(
+            vstack((
+                Element::from(text_block(i18n.t("DiagnosticsSection")).bold()),
+                Element::from(
+                    hstack((
+                        Element::from(open_config),
+                        Element::from(open_logs),
+                        Element::from(
+                            text_block(format!("{}: v{version}", i18n.t("VersionLabel")))
+                                .font_size(12.0)
+                                .opacity(0.7),
+                        ),
+                    ))
+                    .spacing(8.0),
+                ),
+            ))
+            .spacing(8.0),
+        )
+        .padding(Thickness::uniform(16.0))
+        .background(ThemeRef::LayerFill)
+        .corner_radius(8.0),
+    )
+}
+
+/// 在文件管理器中打开一个目录。
+fn open_folder_in_explorer(path: &std::path::Path) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("explorer.exe").arg(path).spawn();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+    }
 }
 
 /// 构建设置页面中的更新区域，根据 UpdateState 展示不同 UI。

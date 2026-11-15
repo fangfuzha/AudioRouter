@@ -16,7 +16,7 @@ pub struct Config {
     pub outputs: Vec<Output>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub struct General {
     pub language: String,
     pub minimized: bool,          // Whether to start minimized to tray

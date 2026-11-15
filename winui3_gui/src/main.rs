@@ -157,7 +157,28 @@ fn activate_existing_window() {
         }
     }
     unsafe {
-        windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
+        let focused = windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
+        if focused == 0 {
+            // 系统前台锁定导致激活失败时，用户会看到「双击了但什么都没发生」。
+            // 闪烁任务栏图标给一个视觉提示。
+            flash_window_handle(hwnd);
+        }
+    }
+}
+
+/// 让窗口在任务栏闪烁若干次。
+fn flash_window_handle(hwnd: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FlashWindowEx, FLASHWINFO, FLASHW_ALL};
+
+    let info = FLASHWINFO {
+        cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
+        hwnd,
+        dwFlags: FLASHW_ALL,
+        uCount: 6,
+        dwTimeout: 0,
+    };
+    unsafe {
+        FlashWindowEx(&info);
     }
 }
 

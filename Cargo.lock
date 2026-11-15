@@ -2546,7 +2546,7 @@ dependencies = [
 
 [[package]]
 name = "winui3_gui"
-version = "0.3.12"
+version = "0.3.13"
 dependencies = [
  "anyhow",
  "app_core",

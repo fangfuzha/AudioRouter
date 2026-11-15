@@ -5,11 +5,11 @@ use app_core::window_placement::WindowRect;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallWindowProcW, EnumWindows, GetSystemMetrics, GetWindowPlacement, GetWindowTextW,
-    IsWindowVisible, PostMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, GWLP_WNDPROC, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_SHOW,
-    WINDOWPLACEMENT, WM_CLOSE, WM_EXITSIZEMOVE, WM_HOTKEY,
+    CallWindowProcW, EnumWindows, FlashWindowEx, GetSystemMetrics, GetWindowPlacement,
+    GetWindowTextW, IsWindowVisible, PostMessageW, SetForegroundWindow, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, FLASHWINFO, FLASHW_ALL, GWLP_WNDPROC, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
+    SW_HIDE, SW_MAXIMIZE, SW_SHOW, WINDOWPLACEMENT, WM_CLOSE, WM_EXITSIZEMOVE, WM_HOTKEY,
 };
 
 /// 全局热键 id（同一窗口只能注册有限个，用固定值即可）。
@@ -342,6 +342,30 @@ pub fn close_window() {
     };
     unsafe {
         PostMessageW(hwnd, WM_CLOSE, 0, 0);
+    }
+}
+
+/// 窗口隐藏（最小化到托盘）时闪烁任务栏图标，提醒用户有事发生。
+///
+/// 隐藏状态下界面上的提示条根本看不到，闪烁是唯一可靠的视觉提示。
+/// 窗口可见时不闪烁，避免干扰正在使用应用的用户。
+pub fn flash_window_if_hidden() {
+    let Some(hwnd) = find_hwnd() else {
+        return;
+    };
+    unsafe {
+        if IsWindowVisible(hwnd) != 0 {
+            return;
+        }
+        let info = FLASHWINFO {
+            cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
+            hwnd,
+            dwFlags: FLASHW_ALL,
+            // 闪烁若干次后自动停止，避免一直闪下去。
+            uCount: 6,
+            dwTimeout: 0,
+        };
+        FlashWindowEx(&info);
     }
 }
 

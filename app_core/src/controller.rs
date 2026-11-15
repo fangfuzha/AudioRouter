@@ -71,7 +71,10 @@ impl AppController {
     }
 
     /// 更新状态文本与级别（所有状态变更都应走这里）。
-    fn set_status(&mut self, level: StatusLevel, text: impl Into<String>) {
+    ///
+    /// 公开出来是为了让 GUI 层的异步任务（例如试听提示音）也能把结果
+    /// 回写到同一条状态通道上。
+    pub fn set_status(&mut self, level: StatusLevel, text: impl Into<String>) {
         self.status_text = text.into();
         self.status_level = level;
     }
@@ -349,6 +352,15 @@ impl AppController {
         }
 
         Ok(None)
+    }
+
+    /// 设置页草稿与已保存配置是否存在差异。
+    ///
+    /// 有差异说明用户改了设置但还没点「保存」，GUI 据此给出提示，
+    /// 避免改了一半切走就丢了。
+    pub fn settings_dirty(&self) -> bool {
+        let saved = self.config_manager.handle().read().general.clone();
+        saved != self.draft_general
     }
 
     pub fn begin_settings_edit(&mut self) {
