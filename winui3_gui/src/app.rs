@@ -134,7 +134,13 @@ impl RootComponent {
                 TrayCommand::StopRouting => {
                     self.controller.lock().stop_routing();
                 }
-                TrayCommand::Quit => std::process::exit(0),
+                TrayCommand::Quit => {
+                    let mut controller = self.controller.lock();
+                    if controller.is_running {
+                        controller.stop_routing();
+                    }
+                    std::process::exit(0);
+                }
             }
         }
     }
