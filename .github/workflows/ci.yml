@@ -5,16 +5,30 @@ on:
     branches: [main]
   pull_request:
 
+# 同一分支的重复 push / PR 更新只保留最新一次，避免重复占用 runner
+concurrency:
+  group: ci-${github.workflow}-${github.ref}
+  cancel-in-progress: true
+
 env:
-  CARGO_INCREMENTAL: 0
-  CARGO_NET_RETRY: 3
-  RUSTUP_MAX_RETRY: 3
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "3"
+  RUSTUP_MAX_RETRY: "3"
   SCCACHE_GHA_ENABLED: "true"
   RUSTC_WRAPPER: "sccache"
+  # dev/test profile 默认带调试信息(debug=2)，会给 295 个依赖全部生成 DWARF/PDB，
+  # 既拖慢编译，又让缓存体积膨胀数倍（本地 target/debug 已达 15GB）。
+  # CI 不需要调试信息，关掉可以同时省编译时间和缓存传输时间。
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
-  rust:
+  # lint 与 test 拆成两个并行 job：两者的依赖编译产物不共享，串行跑等于
+  # 把两轮编译时间相加，并行后墙钟时间取两者的最大值。
+  lint:
+    name: fmt + clippy
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -22,6 +36,9 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
+          # 与 rust-toolchain.toml 保持一致；写死版本避免 stable 发版
+          # 让 sccache / rust-cache 的缓存指纹全部失效
+          toolchain: 1.100.0
           components: rustfmt, clippy
 
       - name: Setup sccache
@@ -30,12 +47,16 @@ jobs:
           # ghac (artifactcache) 偶发 400/5xx,降级为本地缓存而不是直接 fail
           fail-on-cache-err: false
 
-      - name: Cache Rust build
+      - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "."
           shared-key: "ci-windows"
           cache-all-crates: true
+          # 编译复用交给 sccache。这里只缓存依赖源码（~/.cargo/registry、
+          # ~/.cargo/git），不再搬运 GB 级 target 目录——缓存 restore/save
+          # 曾经占到整个 job 的一半以上时间。
+          cache-targets: false
 
       - name: Check formatting
         # 先 fmt --all 兜底(让忘了本地 fmt 的 push 也能过),再 --check 验证
@@ -51,11 +72,46 @@ jobs:
             exit 1
           fi
 
-      - name: Check workspace
-        run: cargo check --locked --workspace --all-targets
+      # clippy --all-targets 已经覆盖 cargo check 的全部检查范围，
+      # 因此不再单独跑 cargo check：check 只产出 metadata，test 需要全量
+      # codegen，两者产物不共享，等于白编一轮依赖。
+      - name: Run clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Report sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  test:
+    name: test
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.100.0
+          components: rustfmt, clippy
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.8
+        with:
+          fail-on-cache-err: false
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+          shared-key: "ci-windows"
+          cache-all-crates: true
+          cache-targets: false
 
       - name: Run tests
         run: cargo test --locked --workspace
 
-      - name: Run clippy
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Report sccache stats
+        if: always()
+        run: sccache --show-stats

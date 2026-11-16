@@ -1,0 +1,13 @@
+# 固定 Rust 工具链版本。
+#
+# 原因：CI / Release 依赖 sccache 与 rust-cache 的编译产物缓存，缓存键包含
+# rustc 版本。一旦 stable 发新版本，所有指纹失效，两个工作流都会退化成
+# 全量重编（历史上 CI 出现过的 500s+ 就是这个原因）。钉死版本后，
+# 缓存可以长期复用，编译行为也与 CI 一致。
+#
+# 升级工具链：改这里的 channel，并同步修改
+# .github/workflows/ci.yml 与 release-windows.yml 里的 toolchain 输入。
+[toolchain]
+channel = "1.100.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

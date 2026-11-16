@@ -20,7 +20,7 @@ on:
 
 # 同一 tag 的并发构建只保留最新一次，避免重复劳动
 concurrency:
-  group: release-windows-${{ github.event.inputs.tag || github.ref }}
+  group: release-windows-${inputs.tag || github.ref}
   cancel-in-progress: true
 
 # 仅保留实际需要的权限
@@ -37,24 +37,30 @@ jobs:
     env:
       WINDOWS_SIGN_CERT: ${{ secrets.WINDOWS_SIGN_CERT }}
       WINDOWS_SIGN_PASSWORD: ${{ secrets.WINDOWS_SIGN_PASSWORD }}
-      CARGO_INCREMENTAL: 0
-      CARGO_NET_RETRY: 3
-      RUSTUP_MAX_RETRY: 3
+      CARGO_INCREMENTAL: "0"
+      CARGO_NET_RETRY: "3"
+      RUSTUP_MAX_RETRY: "3"
+      # 与 CI 共用同一套 sccache 后端：295 个依赖的编译产物可以跨 workflow 复用
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
       SIGNTOOL_PATH: ""
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          fetch-tags: true
+          # 浅克隆即可：tag 推送时 checkout 直接落在 tag 的 commit 上，
+          # 不需要拉全量历史
+          fetch-depth: 1
 
       - name: Resolve release tag
         id: resolve_tag
         shell: pwsh
         run: |
-          if ('${{ github.event.inputs.tag }}' -ne '') {
-            $tag = '${{ github.event.inputs.tag }}'
+          # inputs.tag 同时覆盖 workflow_dispatch 与 workflow_call 两种触发方式
+          $inputTag = '${{ inputs.tag }}'
+          if ($inputTag -ne '') {
+            $tag = $inputTag
           } elseif ('${{ github.ref }}' -like 'refs/tags/*') {
             $tag = '${{ github.ref_name }}'
           } else {
@@ -73,21 +79,45 @@ jobs:
 
       - name: Checkout release tag
         shell: pwsh
-        run: git checkout --detach $env:RELEASE_TAG
+        run: |
+          # 浅克隆里不一定带 tag 对象，统一显式抓取一次（tag 推送时已是同一 commit，
+          # 这次 fetch 只要 1~2 秒；手动触发时才是必需步骤）
+          git fetch --depth 1 origin "+refs/tags/$env:RELEASE_TAG:refs/tags/$env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to fetch tag $env:RELEASE_TAG"
+            exit 1
+          }
+          git checkout --detach $env:RELEASE_TAG
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to checkout $env:RELEASE_TAG"
+            exit 1
+          }
+          Write-Host "HEAD = $((git rev-parse HEAD).Trim())"
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
+          # 与 rust-toolchain.toml 保持一致；写死版本才能复用 sccache 缓存
+          toolchain: 1.100.0
           components: rustfmt, clippy
 
-      - name: Cache Rust build
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.8
+        with:
+          # ghac (artifactcache) 偶发 400/5xx，降级而不是直接 fail
+          fail-on-cache-err: false
+
+      - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "."
           shared-key: "release-windows"
           # 缓存 cargo 安装的二进制工具
           cache-all-crates: true
-          # 保存即使构建失败（方便调试）
+          # 只缓存依赖源码，编译复用交给 sccache：
+          # release 产物（release profile）体积大，上传一次要几十秒
+          cache-targets: false
+          # 即使构建失败也保留（方便调试），此时保存的只有依赖源码缓存
           save-if: "true"
 
       # 缓存 Inno Setup 安装目录，避免每次 choco install（约省 30-60s）
@@ -117,6 +147,13 @@ jobs:
           }
 
       - name: Build winui3_gui (release)
+        env:
+          # 仓库默认 profile 是 lto=true + codegen-units=1（fat LTO 单 codegen unit），
+          # 链接阶段无法并行，是整个发布流程最大的耗时点。
+          # 这里只在 CI 里覆盖成 thin LTO + 16 个 codegen unit：
+          # 链接时间显著下降，仓库默认 profile 保持不变，本地发版仍是 fat LTO。
+          CARGO_PROFILE_RELEASE_LTO: thin
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
         run: cargo build --locked --release --package winui3_gui
 
       # 合并 PFX 解码与 signtool 定位，只执行一次（有证书时）
@@ -128,7 +165,7 @@ jobs:
           Write-Host "Decoding PFX from secret and writing to runner temp"
           [System.IO.File]::WriteAllBytes("$env:RUNNER_TEMP\codesign.pfx", [System.Convert]::FromBase64String('${{ env.WINDOWS_SIGN_CERT }}'))
           Write-Host "Importing PFX into personal cert store"
-          certutil -f -p "${{ env.WINDOWS_SIGN_PASSWORD }}" -importpfx "$env:RUNNER_TEMP\codesign.pfx"
+          certutil -f -p "$env:WINDOWS_SIGN_PASSWORD" -importpfx "$env:RUNNER_TEMP\codesign.pfx"
 
           # 一次性查找 signtool.exe，结果存到 GITHUB_ENV 供后续步骤复用
           $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
@@ -204,6 +241,10 @@ jobs:
           | Signed | $(if ($env:WINDOWS_SIGN_CERT) { 'Yes' } else { 'No' }) |
           "@
           $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Report sccache stats
+        if: always()
+        run: sccache --show-stats
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2

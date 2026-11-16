@@ -304,12 +304,42 @@ pushing a `v*` tag and uploads an Inno Setup installer to a GitHub Release.
    must match the tag, otherwise "check for updates" compares the wrong
    version (the GUI reads it from `CARGO_PKG_VERSION`).
 2. Commit the bump together with the code changes.
-3. `git push origin main` (CI: fmt / check / test / clippy).
+3. `git push origin main` (CI: `lint` 与 `test` 两个并行 job)。
 4. `git tag v<version> && git push origin v<version>` → the release workflow
    builds `cargo build --locked --release`, so `Cargo.lock` must be
    committed and consistent with the manifests.
 
 已发布的版本历史见 `git tag --sort=-creatordate`。
+
+## CI 与 Release 工作流
+
+两个工作流的设计目标：把「跑完一次」从分钟级压下来，并让编译缓存长期有效。
+改造前的实测耗时：CI 188s、Release 505s（其中 413s 花在 release 编译上）。
+
+- **工具链固定在 1.100.0**（见 `rust-toolchain.toml`，两个 workflow 里显式写
+  同样的 `toolchain:` 输入）。缓存键包含 rustc 版本，用 `@stable` 的话一旦
+  Rust 发新版本，sccache / rust-cache 的指纹全部失效，两个工作流都会退化成
+  全量重编。升级工具链时要同时改 `rust-toolchain.toml` 和两个 workflow 的
+  `toolchain` 输入。
+- **编译复用交给 sccache，缓存只留依赖源码**。`Swatinem/rust-cache` 设
+  `cache-targets: false`，只缓存 `~/.cargo/registry` 与 `~/.cargo/git`；
+  之前每次 restore/save 要搬运 GB 级 target 目录（CI 里合计 97s/188s）。
+  dev/test profile 在 CI 里用 `CARGO_PROFILE_DEV_DEBUG=0` /
+  `CARGO_PROFILE_TEST_DEBUG=0` 关掉调试信息，产物体积小一个数量级。
+- **CI 拆成 `lint` 与 `test` 两个并行 job**，墙钟时间取两者最大值，
+  代价是 runner 分钟数上升。
+- **Release 走 sccache + thin LTO**：CI 里用
+  `CARGO_PROFILE_RELEASE_LTO=thin` 和
+  `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16` 覆盖。仓库默认的
+  `lto = true` + `codegen-units = 1`（fat LTO 单 codegen unit，链接阶段
+  无法并行）是发布流程最大的耗时点，但默认 profile 保持不变，本地发版仍走
+  fat LTO。
+- **Release 用浅克隆**（`fetch-depth: 1`），tag 由
+  `git fetch --depth 1 origin +refs/tags/<tag>` 单独抓取，
+  `workflow_dispatch` / `workflow_call` 手动触发同样可用。
+- **tag 解析用 `inputs.tag`**，同时覆盖 `workflow_dispatch` 与
+  `workflow_call`；旧写法 `github.event.inputs.tag` 在 `workflow_call`
+  下取不到值。
 
 ## Validation Commands
 
@@ -323,8 +353,11 @@ cargo build -p winui3_gui                  # debug
 cargo build --release -p winui3_gui        # release
 ```
 
-CI runs the same first four commands on `windows-latest`
-(`.github/workflows/ci.yml`).
+CI 在 `windows-latest` 上跑 `cargo fmt` + `cargo clippy`（`lint` job）
+与 `cargo test`（`test` job），两者并行，见 `.github/workflows/ci.yml`。
+CI 不再单独跑 `cargo check`：`cargo clippy --all-targets` 已经覆盖同样的
+类型检查范围，而 `check` 只产出 metadata、`test` 需要全量 codegen，
+两者产物不共享，等于白编一轮依赖。
 
 To produce an installer:
 
