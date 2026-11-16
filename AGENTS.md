@@ -45,6 +45,32 @@ client and writes to N render clients on a 3ms timer; see
 
 For end-user docs see `README.md`; for short-term todos see `TODO.md`.
 
+## Current Status (2026-11-18)
+
+Four UI complaints fixed in one pass:
+
+- **Sidebar keeps the 0.3.12 native look and now persists its state.** The
+  pane is the framework `NavigationView`; its built-in `PaneToggleButton`
+  (AutomationId `TogglePaneButton`) draws the hamburger at the **top of the
+  pane, above 主页**, and the framework swaps the glyph itself. The expand
+  state is read back through `NavigationView::on_pane_open_changed`
+  (windows-reactor PR #4782), stored in `general.nav_pane_expanded`
+  (`settings.toml`) and restored on the next start. The `windows-reactor`
+  git pin moved from `3415ce9` (2026-08-02) to `a48e42e` (2026-08-05, the
+  merge that added the pane callback).
+- **Channel-mode explanation is tooltip-only.** The always-on line under each
+  output row is gone; the ComboBox carries it as `ToolTipService` content
+  (`.tooltip_with(hover_hint(&selected_desc))`), so it appears on hover only.
+- **Output device list re-laid out.** Rows are a 4-column Grid
+  `[Auto, STAR, Pixel(150), Auto]` (checkbox / name+state / mode combo /
+  试听), vertically centered, with a `DividerStroke` bottom border and 8px
+  inner padding; the list `spacing` is 0 so the rows read as one table.
+- **「全局热键」→「打开窗口快捷键」** in both locales, and the shortcut can
+  now be **captured from the keyboard** with a 录制 button. `windows-reactor`
+  exposes no `KeyDown` event, so capture runs on a **low-level keyboard hook**
+  (`WH_KEYBOARD_LL`) installed on the UI thread while recording; the window
+  procedure stays as a fallback.
+
 ## Current Status (2026-11-17)
 
 Main window, settings page and tray got a usability pass (v0.3.13):
@@ -53,7 +79,7 @@ Main window, settings page and tray got a usability pass (v0.3.13):
   Error), the source device combo shows a placeholder until a device is picked,
   every output row has a **试听** button (plays a test tone on that device from
   a background thread), the selected channel mode is spelled out under the row
-  instead of hiding in a tooltip, active outputs are marked "● 输出中", and the
+  (since 2026-11-18 it is a hover tooltip instead), active outputs are marked "● 输出中", and the
   header shows how many outputs are checked.
 - **Settings page**: the page scrolls, saving a bad global hotkey now shows an
   inline `InfoBar` instead of failing silently, unsaved edits are flagged, and
@@ -62,8 +88,8 @@ Main window, settings page and tray got a usability pass (v0.3.13):
   tooltip mirror the router state; the menu is only rewritten when the state
   actually changes.
 - **Navigation**: the framework's own pane-toggle button has no event
-  callback, so it is hidden and replaced by a custom hamburger in
-  `pane_footer`; the expanded state is persisted in `settings.toml`.
+  callback, so the whole pane is now drawn by hand (see 2026-11-18); the
+  expanded state is persisted in `settings.toml`.
 - **Background failures**: no balloon API in the tray, so a failed route
   flashes the window (`FLASHW_ALL`) when the window is hidden.
 
@@ -204,6 +230,68 @@ Refactor pass complete. Key changes:
   empty-state hints) must give every child a stable `with_key()`. `Element::Empty`
   and `Element::Group` are dropped / spliced before diffing, so they are not a
   substitute for a key.
+- **The sidebar uses the framework `NavigationView` (0.3.12 behaviour).**
+  Its built-in `PaneToggleButton` sits at the top of the pane, above 主页, and
+  the framework manages `IsPaneOpen` and the glyph — do not hide it
+  (`.pane_toggle_button_visible(false)`) and do not move a replacement button
+  into `pane_footer`, or the hamburger ends up at the bottom of the pane.
+  The expand state is read back through `NavigationView::on_pane_open_changed`
+  (windows-reactor PR #4782) and stored in `general.nav_pane_expanded`.
+- **WinUI overrides `IsPaneOpen` when the NavigationView template loads.** A
+  value set at mount is discarded: the framework forces its own default
+  (expanded) and raises `NavigationPaneOpenChanged`. Hence the pane state is
+  modelled twice — *desired* (`nav_expanded`, mirrors the config) and
+  *declared* (`pane_declared`, handed to the framework) — and the framework's
+  startup event must never be written to the config. reactor's diff only
+  calls the setter when the declared value changes, so restoring a collapsed
+  pane needs the declared value to yield once (to the native value) before the
+  effect pulls it back to the desired value.
+- **The reactor dependency is pinned to a git revision, not to crates.io.**
+  `windows-reactor 0.100.0` on crates.io is a different snapshot
+  (`src/core/...` layout) and does **not** contain `on_pane_open_changed`;
+  only the pinned git revision `a48e42e` (PR #4782) carries it. Do not switch
+  to the published crate without re-checking that API.
+- **The reactor icon API changed in PR #4782.** `Icon::bitmap(uri)` is gone;
+  use `Icon::image(uri)` for a full-colour SVG/ImageIcon and
+  `Icon::bitmap_icon(uri, show_as_monochrome)` for a WinUI BitmapIcon.
+- **An SVG `ImageIcon` fills the space it is given.** Inside a `Button` that
+  has no explicit size, the icon stretches and the button grows to the whole
+  row/column. Icon buttons therefore carry an explicit `.height(...)` and
+  `.padding(...)`; do not remove them thinking they are cosmetic.
+- **A `{ThemeResource}`-based Style does not retry.** If the referenced brush
+  is not registered before the first render, loading the Style fails and the
+  element stays unstyled forever. The sidebar background therefore uses a
+  literal light/dark `Color` instead of `AudioRouterSidebarBackground`.
+- **Hotkey capture must use a low-level keyboard hook (`WH_KEYBOARD_LL`),** not a
+  window procedure. WinUI 3 delivers keyboard messages to the *focus* window
+  (a hidden helper window), and the first Alt press puts the system into
+  "menu activation" mode, where the next key press is eaten by the system menu
+  — so `Ctrl+Alt+M` never reaches the app the first time. The LL hook runs
+  before message dispatch, sees every key, and tracks the modifier state itself
+  (`app_core::hotkey::modifier_bit`) instead of relying on `GetKeyState`.
+  See `keyboard_hook()` / `install_capture_hook()` in
+  `winui3_gui/src/window_utils.rs`. The window-procedure path is kept only as a
+  fallback, and each subclassed window needs its own original-wndproc slot
+  (`MAIN_WNDPROC` vs `KEYBOARD_WNDPROC`) — sharing one slot overwrites it.
+- **Writing state during a render does not schedule another render.** A
+  `SetState::call` inside the render body updates the value but the UI keeps
+  showing the previous frame, so a "clear this message" write can leave stale
+  text on screen. Derive the text for *this* frame from the data at hand (e.g.
+  the hotkey capture result) instead of relying on a follow-up render.
+- **The registered hotkey opens the window, it does not toggle it.** The
+  handler calls `show_and_focus_window()`; the tray menu keeps the
+  show/hide toggle. `app_core::hotkey::describe` renders a captured
+  combination (`Ctrl+Alt+M`) and `is_modifier_key` rejects modifier-only input.
+- **`ElementExt::tooltip(text)` never shows anything in WinUI 3.** The
+  reactor hands `ToolTipService.SetToolTip` a *boxed* string
+  (`IReference<HSTRING>`), but WinUI 3's `ToolTipService::ConvertToToolTip`
+  only recognises an `IToolTip` instance or another renderable object — a
+  boxed string is dropped into `ToolTip.Content` untouched, so the tooltip
+  stays empty and is never shown (no error, no popup window). Use the rich
+  path instead: `tooltip_with(Tooltip::rich(text_block(...)))` (see
+  `hover_hint()` in `winui3_gui/src/app.rs`) creates a real `ToolTip` control
+  whose content is a `TextBlock`; that renders correctly in light and dark
+  themes.
 - **CLI builds must be on Windows** — `windows-sys` and `windows`
   are pulled unconditionally; cross-compilation is not configured.
 
