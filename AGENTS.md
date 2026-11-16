@@ -175,8 +175,8 @@ Refactor pass complete. Key changes:
 - Release log file rotates at 5 MiB in `init_logger`.
 - CI: `cargo fmt --all` runs as a fallback before `--check` so a forgotten
   local `cargo fmt` no longer fails the run; `mozilla-actions/sccache-action`
-  upgraded to v0.0.8 with `fail-on-cache-err: false` to ride out ghac
-  (artifactcache) jitter.
+  upgraded to v0.0.8 (that version has no `fail-on-cache-err` input — ghac
+  jitter is handled by sccache falling back to its local cache).
 - Clippy + fmt + tests all clean at workspace level.
 
 ## High-Priority Remaining Work
@@ -382,6 +382,11 @@ pushing a `v*` tag and uploads an Inno Setup installer to a GitHub Release.
 - **tag 解析用 `inputs.tag`**，同时覆盖 `workflow_dispatch` 与
   `workflow_call`；旧写法 `github.event.inputs.tag` 在 `workflow_call`
   下取不到值。
+- **`sccache-action` 只认 `version` / `token` / `disable_annotations`。**
+  v0.0.8（当前固定版本，最新的 v0.0.11 也一样）没有 `fail-on-cache-err`
+  输入，写上去只是空转，还会让 action 每轮刷一条 `Unexpected input`
+  警告。artifactcache 偶发 400/5xx 时 sccache 自己会退回本地缓存，不会让
+  构建失败，所以不需要这个开关。
 
 ## Validation Commands
 
