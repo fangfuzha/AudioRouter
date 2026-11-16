@@ -14,7 +14,7 @@ ureq = { version = "3", default-features = false, features = [
 ] }
 serde = { version = "1", features = ["derive"] }
 semver = { version = "1", features = ["serde"] }
-windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "3415ce9f856aeaf79555bbbfac5acb02405dcc89" }
+windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "a48e42ebe507985f2f474c4007fe8db2141371a4" }
 windows-core = { version = "0.62.2", features = ["std"] }
 log = "0.4"
 env_logger = "0.11"
@@ -33,7 +33,7 @@ windows-sys = { version = "0.61", features = [
 parking_lot = "0.13"
 
 [build-dependencies]
-windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", rev = "3415ce9f856aeaf79555bbbfac5acb02405dcc89" }
+windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", rev = "a48e42ebe507985f2f474c4007fe8db2141371a4" }
 # 把 assets/icon.ico 嵌入到 exe 资源段，使 exe 在任务栏/开始菜单/资源管理器
 # 中显示项目图标（不依赖外部文件）。
 winres = "0.1"

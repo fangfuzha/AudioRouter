@@ -1,5 +1,5 @@
 use parking_lot::Mutex;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use app_core::controller::{AppController, StartBlock, StatusLevel};
@@ -109,6 +109,12 @@ pub struct RootComponent {
     update_state: Arc<Mutex<UpdateState>>,
     /// 上一次同步到托盘的运行状态，避免每帧都去写托盘菜单。
     tray_status: Arc<Mutex<Option<(bool, usize)>>>,
+    /// 框架首次加载模板时会把 `NavigationView.IsPaneOpen` 强制改回默认值
+    /// （展开），我们在挂载阶段声明的「收起」会被丢弃。这个标记表示
+    /// 「接下来第一个 IsPaneOpen 事件是框架的重置，而不是用户操作」。
+    pane_override_pending: Arc<AtomicBool>,
+    /// 是否已经渲染过第一帧（用于在首帧设置上面的标记）。
+    pane_first_render: Arc<AtomicBool>,
 }
 
 impl RootComponent {
@@ -120,6 +126,8 @@ impl RootComponent {
             device_watcher: Arc::new(Mutex::new(None)),
             update_state: Arc::new(Mutex::new(UpdateState::Idle)),
             tray_status: Arc::new(Mutex::new(None)),
+            pane_override_pending: Arc::new(AtomicBool::new(false)),
+            pane_first_render: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -233,8 +241,35 @@ impl Component for RootComponent {
             let c = self.controller.lock();
             c.nav_pane_expanded()
         };
+        // nav_expanded：侧栏的「期望状态」，与配置保持一致。
+        // pane_declared：实际声明给框架的值。
+        //
+        // 两者必须分开：WinUI 在加载 NavigationView 模板时会把 IsPaneOpen
+        // 强制改回自己的默认值（展开），挂载阶段声明的「收起」会被丢弃；
+        // 而 reactor 的 diff 只在声明值发生变化时才下发 setter。声明值因此
+        // 需要先「让位」一次，再由下面的 effect 收敛回期望状态。
         let (nav_expanded, set_nav_expanded) = cx.use_state(initial_expanded);
+        let (pane_declared, set_pane_declared) = cx.use_state(initial_expanded);
         let (nav_selected, set_nav_selected) = cx.use_state(NAV_TAG_HOME.to_string());
+
+        // 声明「收起」时，框架加载模板会把 IsPaneOpen 改回「展开」并触发一次
+        // 事件。那不是用户的操作，必须与用户点击区分开，否则配置里记住的
+        // 状态会被启动时的默认值顶掉。
+        if !self.pane_first_render.swap(true, Ordering::SeqCst) {
+            self.pane_override_pending
+                .store(!nav_expanded, Ordering::SeqCst);
+        }
+
+        // 让声明值收敛到期望状态：用户点击时两者同步变化；启动时被框架重置
+        // 则会把声明值拉回配置里记住的状态。
+        cx.use_effect(pane_declared, {
+            let set_pane_declared = set_pane_declared.clone();
+            move || {
+                if pane_declared != nav_expanded {
+                    set_pane_declared.call(nav_expanded);
+                }
+            }
+        });
         // 设置页的内联错误提示（保存失败 / 热键被占用等）。
         let (settings_error, set_settings_error) = cx.use_state(None::<String>);
         // 快捷键录制提示（例如「至少要包含一个修饰键」）。
@@ -368,8 +403,10 @@ impl Component for RootComponent {
         main_app(
             Arc::clone(&self.controller),
             render_request,
-            nav_expanded,
             set_nav_expanded,
+            pane_declared,
+            set_pane_declared,
+            Arc::clone(&self.pane_override_pending),
             nav_selected,
             set_nav_selected,
             theme_choice,
@@ -386,8 +423,10 @@ impl Component for RootComponent {
 fn main_app(
     controller: Arc<Mutex<AppController>>,
     render_request: RenderRequest,
-    nav_expanded: bool,
     set_nav_expanded: SetState<bool>,
+    pane_declared: bool,
+    set_pane_declared: SetState<bool>,
+    pane_override_pending: Arc<AtomicBool>,
     nav_selected: String,
     set_nav_selected: SetState<String>,
     theme_choice: ThemeChoice,
@@ -407,7 +446,6 @@ fn main_app(
         move || render.request()
     };
 
-    // nav_items:首页 + 仓库链接。
     // GitHub 项使用 SVG 图标（ImageIcon + SvgImageSource），根据当前主题
     // 选择浅色（黑色图标）或深色（白色图标）版本，确保在任意主题背景下可见。
     let is_dark = match theme_choice {
@@ -424,15 +462,6 @@ fn main_app(
         let path_str = path.to_string_lossy().replace('\\', "/");
         format!("file:///{path_str}")
     };
-
-    let nav_items = [
-        NavViewItem::new(i18n.t("AppTitle"))
-            .tag(NAV_TAG_HOME)
-            .icon(Symbol::Home),
-        NavViewItem::new(i18n.t("GitHub"))
-            .tag(NAV_TAG_GITHUB)
-            .icon(Icon::bitmap(github_icon_uri)),
-    ];
 
     let body: Element = if nav_selected == NAV_TAG_SETTINGS {
         settings_page(
@@ -451,44 +480,41 @@ fn main_app(
         home_page(Arc::clone(&controller), i18n.clone(), make_setter.clone())
     };
 
-    // 使用 Left 模式：展开时内联推开内容（非浮动覆盖），收起时变为窄图标条。
+    // === 侧栏 ===
     //
-    // 关键：windows-reactor 的 diff 机制在属性值不变时跳过 setter 调用
-    // （见 reconciler/diff_helpers.rs 的 diff_props 实现）。
-    // 因此 Rust 侧 is_pane_open 值不变时，不会覆盖用户点击 PaneToggleButton
-    // 后框架内部切换的 IsPaneOpen 状态。框架自行管理展开/收起，Rust 侧
-    // 只提供初始值。
-    let pane_open = nav_expanded;
+    // 侧栏使用 NavigationView（与 0.3.12 一致）：三横线按钮由框架自带
+    // PaneToggleButton 提供，固定画在侧栏顶部——也就是「主页」按钮的上方，
+    // 展开/收起时图标由框架自动切换。
+    //
+    // 展开状态本身由框架托管：框架的 PaneToggleButton 点击后只改控件内部的
+    // IsPaneOpen，reactor 的 diff 机制在属性值不变时跳过 setter 调用，所以
+    // Rust 侧不会把它覆盖回去。
+    //
+    // windows-reactor 从 PR #4782 起提供 `on_pane_open_changed`：框架把
+    // 新的 IsPaneOpen 回调出来。这里把它同步回 Rust 状态并写入配置，
+    // 于是「收起 / 展开」既保留框架原生的按钮位置与图标，又能跨重启记住。
+    let set_nav_expanded_for_pane = set_nav_expanded.clone();
+    let set_pane_declared_for_pane = set_pane_declared.clone();
+    let controller_for_pane = Arc::clone(&controller);
+    let pane_open = pane_declared;
 
-    // 框架自带的折叠按钮没有事件回调，无法感知用户点击，也就无法把展开状态
-    // 持久化。这里隐藏自带按钮，改用侧栏底部的自定义按钮：点击后立刻写入
-    // 配置，下次启动沿用上次的展开状态。
-    let toggle_controller = Arc::clone(&controller);
-    let set_nav_expanded_for_toggle = set_nav_expanded.clone();
-    let current_expanded = nav_expanded;
-    let pane_toggle = Element::from(
-        button("")
-            // Segoe Fluent Icons 的 E700 是「全局导航」汉堡图标。
-            .icon(Icon::font_family("\u{E700}", "Segoe Fluent Icons"))
-            .on_click(move || {
-                let next = !current_expanded;
-                {
-                    let mut c = toggle_controller.lock();
-                    c.set_nav_pane_expanded(next);
-                }
-                set_nav_expanded_for_toggle.call(next);
-            }),
-    )
-    .tooltip(i18n.t("TogglePane"));
+    // 导航项：主页 / GitHub 仓库；设置项用框架内置的 SettingsItem。
+    let nav_items = [
+        NavViewItem::new(i18n.t("AppTitle"))
+            .tag(NAV_TAG_HOME)
+            .icon(Symbol::Home),
+        NavViewItem::new(i18n.t("GitHub"))
+            .tag(NAV_TAG_GITHUB)
+            .icon(Icon::image(github_icon_uri)),
+    ];
 
     // 内置 SettingsItem 点击时 Tag 为 null，提取链返回空字符串。
     // 用排除法：tag == NAV_TAG_HOME → 首页；tag == NAV_TAG_GITHUB → 打开
     // 仓库 URL 后回弹选中项；其它（含 "settings" 与空串）→ 设置页。
-    // GitHub 按钮在 nav_items 中(在 settings 上方),点击后浏览器打开仓库,
-    // 然后把 selected_tag 回弹到 home（避免侧栏停留在这个临时态上）。
     let nav_selected_for_handler = nav_selected.clone();
     let set_nav_selected_for_handler = set_nav_selected.clone();
     let controller_for_handler = Arc::clone(&controller);
+
     // Ctrl+W 关闭窗口：挂在根元素上且不指定 ScopeOwner，
     // 因此在窗口内容范围内全局生效（焦点在文本框等控件里时同样有效）。
     let close_accel = KeyboardAccelerator::new(
@@ -518,12 +544,28 @@ fn main_app(
                     set_nav_selected_for_handler.call(NAV_TAG_SETTINGS.to_string());
                 }
             })
+            .on_pane_open_changed(move |open: bool| {
+                // 框架加载模板时把 IsPaneOpen 强制改回默认值（展开）：那是框架
+                // 的重置、不是用户的操作，不能写进配置，也不能让它顶掉配置里
+                // 记住的状态。这里只把声明值让位成原生值，再由上面的 effect
+                // 收敛回期望状态。
+                if pane_override_pending.swap(false, Ordering::SeqCst) && open {
+                    log::info!("NavigationView pane reset by framework at startup");
+                    set_pane_declared_for_pane.call(open);
+                    return;
+                }
+                // 用户点击三横线：采纳并持久化。
+                {
+                    let mut c = controller_for_pane.lock();
+                    c.set_nav_pane_expanded(open);
+                }
+                set_nav_expanded_for_pane.call(open);
+                set_pane_declared_for_pane.call(open);
+            })
             .settings_visible(true)
             .pane_title("AudioRouter")
             .pane_display_mode(NavigationViewPaneDisplayMode::Left)
             .pane_open(pane_open)
-            .pane_toggle_button_visible(false)
-            .pane_footer(pane_toggle)
             .open_pane_length(240.0),
     )
     .keyboard_accelerator(close_accel)
