@@ -315,7 +315,7 @@ Refactor pass complete. Key changes:
   `enum_callback` filters by process id — another process may well have a
   window titled "AudioRouter", and subclassing someone else's window would be
   very bad. Getting the handle from the framework instead
-  (`IWindowNative::WindowHandle`) is tracked in issue #1;
+  (`IWindowNative::WindowHandle`) is tracked in microsoft/windows-rs#5388;
   `main.rs`'s single-instance activation deliberately looks across
   processes and therefore must **not** use the PID filter.
 - **Writing state during a render does not schedule another render.** A
