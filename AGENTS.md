@@ -188,11 +188,6 @@ Refactor pass complete. Key changes:
      to exercise fetch + download against the real latest release. The
      installer handoff itself (`launch_installer_and_quit`) still needs a
      human pass: it installs over the running build.
-   - "Icon replacement" — swap `assets/icon.ico` and
-     `assets/icon.png` (used by `build.rs` `winres` and tray fallback).
-     The current assets are technically fine (PNG has alpha, the ICO carries
-     16/32/48/256); this is an art-direction task, so it needs a design
-     decision rather than a mechanical swap.
    - Multi-channel routing (5.1 → stereo downmix) is out of scope per
      the existing `decode_channel_mask` parsing in
      `audio_core/src/utils.rs`.
