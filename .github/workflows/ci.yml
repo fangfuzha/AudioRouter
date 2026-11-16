@@ -43,9 +43,10 @@ jobs:
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.8
-        with:
-          # ghac (artifactcache) 偶发 400/5xx,降级为本地缓存而不是直接 fail
-          fail-on-cache-err: false
+        # 该版本没有 fail-on-cache-err 输入（只有 version/token/disable_annotations），
+        # 之前写的那个输入是空转的，每轮还会刷一条 Unexpected input 警告。
+        # artifactcache 偶发 400/5xx 时 sccache 自己会记日志并退回本地缓存，
+        # 不会让构建失败。
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
