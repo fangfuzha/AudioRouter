@@ -96,7 +96,10 @@ pub fn format(hotkey: Hotkey) -> String {
 }
 
 /// 虚拟键码 → 规范按键名。
-fn key_name(vk: u32) -> Option<&'static str> {
+///
+/// GUI 捕获按键时也要用到（把 Win32 虚拟键码翻译成 `Ctrl+Alt+M` 里的
+/// 那一段），所以这里是公开的。
+pub fn key_name(vk: u32) -> Option<&'static str> {
     const NAMED: &[(u32, &str)] = &[
         (0x08, "Backspace"),
         (0x09, "Tab"),
@@ -152,6 +155,46 @@ fn key_name(vk: u32) -> Option<&'static str> {
         return Some(FKEYS[(vk - 0x70) as usize]);
     }
     None
+}
+
+/// 判断一个虚拟键码是不是「纯修饰键」。
+///
+/// 修饰键本身不能作为快捷键的主键，捕获时要把它们忽略掉，
+/// 继续等用户按下真正的按键。
+pub fn is_modifier_key(vk: u32) -> bool {
+    matches!(
+        vk,
+        0x10 | 0x11 | 0x12 | 0x14 | 0x15 | 0x5B | 0x5C | 0xA0..=0xA5
+    )
+}
+
+/// 修饰键虚拟键码 → 修饰键掩码（`MOD_*`）。
+///
+/// 捕获组合键时用它自己累计修饰键状态：低级键盘钩子给的是一串独立的
+/// 按键事件，按下就加上、抬起就减去，比 `GetKeyState` 更可靠
+/// （`GetKeyState` 只反映「本线程最后处理的消息」那一刻的状态）。
+pub fn modifier_bit(vk: u32) -> Option<u32> {
+    match vk {
+        0x10 | 0xA0 | 0xA1 => Some(MOD_SHIFT),
+        0x11 | 0xA2 | 0xA3 => Some(MOD_CONTROL),
+        0x12 | 0x14 | 0x15 | 0xA4 | 0xA5 => Some(MOD_ALT),
+        0x5B | 0x5C => Some(MOD_WIN),
+        _ => None,
+    }
+}
+
+/// 由「虚拟键码 + 修饰键掩码」生成规范快捷键字符串。
+///
+/// GUI 捕获键盘输入时走这条路径：用户按下 Ctrl+Alt+M 之后，
+/// 窗口过程拿到虚拟键码和当前修饰键状态，交给这里翻译成
+/// `Ctrl+Alt+M` 这样的字符串。
+///
+/// 返回 `None` 表示这个键不能作为快捷键（只有修饰键、或者按键名不认识）。
+pub fn describe(vk: u32, modifiers: u32) -> Option<String> {
+    if is_modifier_key(vk) || key_name(vk).is_none() {
+        return None;
+    }
+    Some(format(Hotkey { modifiers, vk }))
 }
 
 /// 按键名 → 虚拟键码。
@@ -245,5 +288,42 @@ mod tests {
         assert_eq!(format(parse("control+alt+m").unwrap()), "Ctrl+Alt+M");
         assert_eq!(format(parse("shift+f12").unwrap()), "Shift+F12");
         assert_eq!(format(parse("win+space").unwrap()), "Win+Space");
+    }
+
+    #[test]
+    fn describes_captured_keyboard_input() {
+        // Ctrl+Alt+M：M 的虚拟键码是 0x4D。
+        assert_eq!(
+            describe(0x4D, MOD_CONTROL | MOD_ALT).as_deref(),
+            Some("Ctrl+Alt+M")
+        );
+        assert_eq!(describe(0x20, MOD_WIN).as_deref(), Some("Win+Space"));
+        assert_eq!(
+            describe(0x74, MOD_CONTROL | MOD_SHIFT).as_deref(),
+            Some("Ctrl+Shift+F5")
+        );
+    }
+
+    #[test]
+    fn rejects_modifier_only_and_unknown_keys() {
+        // 只按了 Ctrl，没有任何主键：不能用。
+        assert!(describe(0x11, MOD_CONTROL).is_none());
+        assert!(describe(0xA2, MOD_CONTROL).is_none());
+        // 不认识的键（例如媒体键）。
+        assert!(describe(0xB3, MOD_CONTROL).is_none());
+        assert!(is_modifier_key(0x11));
+        assert!(is_modifier_key(0x5B));
+        assert!(!is_modifier_key(0x4D));
+    }
+
+    #[test]
+    fn maps_modifier_keys_to_mask_bits() {
+        assert_eq!(modifier_bit(0x11), Some(MOD_CONTROL));
+        assert_eq!(modifier_bit(0xA2), Some(MOD_CONTROL));
+        assert_eq!(modifier_bit(0x12), Some(MOD_ALT));
+        assert_eq!(modifier_bit(0x10), Some(MOD_SHIFT));
+        assert_eq!(modifier_bit(0xA1), Some(MOD_SHIFT));
+        assert_eq!(modifier_bit(0x5B), Some(MOD_WIN));
+        assert_eq!(modifier_bit(0x4D), None);
     }
 }

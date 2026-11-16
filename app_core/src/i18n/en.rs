@@ -119,12 +119,23 @@ pub const EN_MAP: &[(&str, &str)] = &[
     ("ClearAll", "Clear All"),
     ("TestSound", "Test"),
     ("SourcePlaceholder", "Select source device"),
-    ("Hotkey", "Global hotkey"),
+    ("Hotkey", "Open window shortcut"),
     ("HotkeyPlaceholder", "e.g. Ctrl+Alt+M"),
-    ("GlobalHotkey", "Global hotkey"),
+    ("GlobalHotkey", "Open window shortcut"),
     (
         "HotkeyHint",
-        "Leave empty to disable; when set it shows/hides the window",
+        "Leave empty to disable; when set, the shortcut opens the main window",
+    ),
+    ("HotkeyRecord", "Record"),
+    ("HotkeyRecording", "Recording..."),
+    ("HotkeyClear", "Clear"),
+    (
+        "HotkeyRecordHint",
+        "Click Record, then press a key combination (Ctrl/Alt/Shift/Win required). Esc cancels",
+    ),
+    (
+        "HotkeyNeedsModifier",
+        "A shortcut needs at least one Ctrl/Alt/Shift/Win modifier",
     ),
     ("HotkeyInvalid", "Invalid hotkey: {error}"),
     (
