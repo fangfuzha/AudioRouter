@@ -175,8 +175,8 @@ Refactor pass complete. Key changes:
 - Release log file rotates at 5 MiB in `init_logger`.
 - CI: `cargo fmt --all` runs as a fallback before `--check` so a forgotten
   local `cargo fmt` no longer fails the run; `mozilla-actions/sccache-action`
-  upgraded to v0.0.8 (that version has no `fail-on-cache-err` input — ghac
-  jitter is handled by sccache falling back to its local cache).
+  upgraded to v0.0.11 (v0.0.8 could not write to the retired Cache API v1,
+  so sccache silently ran read-only and never produced a cache entry).
 - Clippy + fmt + tests all clean at workspace level.
 
 ## High-Priority Remaining Work
@@ -388,11 +388,15 @@ pushing a `v*` tag and uploads an Inno Setup installer to a GitHub Release.
 - **tag 解析用 `inputs.tag`**，同时覆盖 `workflow_dispatch` 与
   `workflow_call`；旧写法 `github.event.inputs.tag` 在 `workflow_call`
   下取不到值。
-- **`sccache-action` 只认 `version` / `token` / `disable_annotations`。**
-  v0.0.8（当前固定版本，最新的 v0.0.11 也一样）没有 `fail-on-cache-err`
-  输入，写上去只是空转，还会让 action 每轮刷一条 `Unexpected input`
-  警告。artifactcache 偶发 400/5xx 时 sccache 自己会退回本地缓存，不会让
-  构建失败，所以不需要这个开关。
+- **`sccache-action` 固定在 v0.0.11，并且必须能连上 Cache Service v2。**
+  v0.0.8 不会导出 `ACTIONS_CACHE_SERVICE_V2=on`，sccache 于是去用已被
+  GitHub 下线的 Cache API v1：每次写入都失败（`cache_write_errors` 等于
+  编译数）、统计里 `effective_cache_mode` 变成 `ReadOnly`、Actions 缓存列表
+  里一条 sccache 条目都留不下，命中永远是 0 —— 只剩每次编译多一次远端
+  查找的开销。v0.0.11 起会导出该变量，workflow 里也显式写了
+  `ACTIONS_CACHE_SERVICE_V2: "on"`，防止 action 版本回退。
+  该版本只认 `version` / `token` / `disable_annotations` 三个输入，没有
+  `fail-on-cache-err`（写了是空转，每轮还会刷一条 `Unexpected input` 警告）。
 
 ## Validation Commands
 

@@ -16,6 +16,12 @@ env:
   RUSTUP_MAX_RETRY: "3"
   SCCACHE_GHA_ENABLED: "true"
   RUSTC_WRAPPER: "sccache"
+  # sccache 的 GHA 后端必须走 Cache Service v2：v1 API 已被 GitHub 下线，
+  # 还在用 v1 时每次写入都会失败，sccache 退化成只读模式
+  #（effective_cache_mode=ReadOnly、cache_writes=0、命中永远是 0），
+  # 等于白付一次远端查找的开销。mozilla-actions/sccache-action 从 v0.0.11
+  # 起会自己导出这个变量，这里再显式写一份，防止 action 版本回退。
+  ACTIONS_CACHE_SERVICE_V2: "on"
   # dev/test profile 默认带调试信息(debug=2)，会给 295 个依赖全部生成 DWARF/PDB，
   # 既拖慢编译，又让缓存体积膨胀数倍（本地 target/debug 已达 15GB）。
   # CI 不需要调试信息，关掉可以同时省编译时间和缓存传输时间。
@@ -42,11 +48,11 @@ jobs:
           components: rustfmt, clippy
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.8
-        # 该版本没有 fail-on-cache-err 输入（只有 version/token/disable_annotations），
+        uses: mozilla-actions/sccache-action@v0.0.11
+        # v0.0.11 起会导出 ACTIONS_CACHE_SERVICE_V2=on，sccache 才能用上
+        # Cache Service v2（v1 已被 GitHub 下线，写入会全部失败）。
+        # 该版本只认 version/token/disable_annotations，没有 fail-on-cache-err，
         # 之前写的那个输入是空转的，每轮还会刷一条 Unexpected input 警告。
-        # artifactcache 偶发 400/5xx 时 sccache 自己会记日志并退回本地缓存，
-        # 不会让构建失败。
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -98,11 +104,11 @@ jobs:
           components: rustfmt, clippy
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.8
-        # 该版本没有 fail-on-cache-err 输入（只有 version/token/disable_annotations），
+        uses: mozilla-actions/sccache-action@v0.0.11
+        # v0.0.11 起会导出 ACTIONS_CACHE_SERVICE_V2=on，sccache 才能用上
+        # Cache Service v2（v1 已被 GitHub 下线，写入会全部失败）。
+        # 该版本只认 version/token/disable_annotations，没有 fail-on-cache-err，
         # 之前写的那个输入是空转的，每轮还会刷一条 Unexpected input 警告。
-        # artifactcache 偶发 400/5xx 时 sccache 自己会记日志并退回本地缓存，
-        # 不会让构建失败。
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
