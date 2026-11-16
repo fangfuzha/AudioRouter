@@ -11,6 +11,20 @@ use crate::events::{PendingEvents, RenderRequest};
 use crate::tray::TrayCommand;
 use crate::window_utils;
 
+/// 生成一个能正常弹出的悬浮提示（tooltip）。
+///
+/// `ElementExt::tooltip(text)` 走 WinUI 的 `ToolTipService.SetToolTip`，
+/// 但 windows-reactor 传进去的是装箱字符串（`IReference<HSTRING>`）。
+/// WinUI 3 的 `ToolTipService::ConvertToToolTip` 只认 `IToolTip` 实例或
+/// 可渲染对象，装箱字符串会被原样塞进 `ToolTip.Content`，结果内容为空、
+/// 整个提示根本不显示。
+///
+/// `Tooltip::rich(...)` 走 reactor 的富文本分支：它会创建一个真正的
+/// `ToolTip` 控件，并把 `TextBlock` 作为内容挂上去，WinUI 才能正常渲染。
+fn hover_hint(text: &str) -> Tooltip {
+    Tooltip::rich(text_block(text.to_string()))
+}
+
 /// 更新状态机，用于设置页面的 UI 展示
 #[derive(Clone, Default)]
 pub enum UpdateState {
@@ -608,8 +622,21 @@ fn home_page(
                 })
             };
 
-            // 使用 Grid + 四列 [Auto, Star, Auto, Auto]：Star 列占据剩余空间，
-            // 把声道模式下拉框和试听按钮推到行末。
+            // 设备名这一格：正在输出时在名字后面跟一个标记，
+            // 避免「勾了但没声音」时无从判断是哪个设备在工作。
+            let mut name_cells: Vec<Element> =
+                vec![Element::from(text_block(device.friendly_name.clone()))];
+            if is_running && enabled {
+                name_cells.push(Element::from(
+                    text_block(i18n.t("Outputting")).font_size(12.0),
+                ));
+            }
+            let name_cell = Element::from(hstack(name_cells).spacing(8.0))
+                .vertical_alignment(VerticalAlignment::Center);
+
+            // 每行四列：勾选框 | 设备名 | 声道模式 | 试听。
+            // 声道模式列固定宽度，所有设备的下拉框才对得齐；
+            // 设备名列吃掉剩余空间，试听按钮始终贴在最右边。
             let row = Element::from(
                 grid((
                     Element::from({
@@ -622,8 +649,9 @@ fn home_page(
                             refresh();
                         })
                     })
+                    .vertical_alignment(VerticalAlignment::Center)
                     .grid_column(0),
-                    Element::from(text_block(device.friendly_name.clone())).grid_column(1),
+                    name_cell.grid_column(1),
                     Element::from({
                         let controller_clone = Arc::clone(&controller);
                         let refresh = make_setter.clone();
@@ -645,37 +673,44 @@ fn home_page(
                                 refresh();
                             })
                     })
-                    .tooltip(selected_desc.clone())
+                    // 声道模式的说明只以悬浮提示出现，不再常驻占一行。
+                    .tooltip_with(hover_hint(&selected_desc))
+                    .vertical_alignment(VerticalAlignment::Center)
                     .grid_column(2),
-                    Element::from(test_button).grid_column(3),
+                    Element::from(test_button)
+                        .vertical_alignment(VerticalAlignment::Center)
+                        .grid_column(3),
                 ))
                 .columns([
                     GridLength::Auto,
                     GridLength::STAR,
-                    GridLength::Auto,
+                    GridLength::Pixel(150.0),
                     GridLength::Auto,
                 ])
                 .column_spacing(12.0),
             );
 
-            // 声道模式说明常驻显示在设备行下方：tooltip 只有鼠标悬停时才可见，
-            // 第一次使用时很难注意到。
-            let mut details: Vec<Element> = vec![Element::from(
-                text_block(selected_desc).font_size(12.0).opacity(0.7),
-            )];
-            // 正在接收音频的输出设备给一个显式标记，
-            // 避免「勾了但没声音」时无从判断是哪个设备在工作。
-            if is_running && enabled {
-                details.push(Element::from(
-                    text_block(i18n.t("Outputting")).font_size(12.0),
-                ));
-            }
-
             // 设备列表会随热插拔增减，给每一行一个稳定的 key：
             // 框架对无 key 的兄弟节点按位置复用控件，列表一变长就会
             // 把不同设备的行错配到别的设备上。
-            Element::from(vstack((row, vstack(details).spacing(2.0))).spacing(2.0))
-                .with_key(format!("home.output.{device_id}"))
+            // 行与行之间用一条细分隔线区分，比单纯拉大间距更整齐。
+            Element::from(
+                border(row)
+                    .border_brush(ThemeRef::DividerStroke)
+                    .border_thickness(Thickness {
+                        left: 0.0,
+                        top: 0.0,
+                        right: 0.0,
+                        bottom: 1.0,
+                    })
+                    .padding(Thickness {
+                        left: 4.0,
+                        top: 8.0,
+                        right: 4.0,
+                        bottom: 8.0,
+                    }),
+            )
+            .with_key(format!("home.output.{device_id}"))
         })
         .collect();
 
@@ -796,7 +831,8 @@ fn home_page(
     );
     page.push(
         Element::from(
-            scroll_viewer(vstack(output_items).spacing(4.0))
+            // 行之间已经有分隔线，列表本身不再额外加间距。
+            scroll_viewer(vstack(output_items).spacing(0.0))
                 .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto),
         )
         .with_key("home.outputs"),
