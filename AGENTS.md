@@ -334,6 +334,12 @@ Refactor pass complete. Key changes:
   `hover_hint()` in `winui3_gui/src/app.rs`) creates a real `ToolTip` control
   whose content is a `TextBlock`; that renders correctly in light and dark
   themes.
+- **PowerShell 里 `$env:VAR` 后面紧跟 `:` 会被吞进变量名。**
+  双引号中的 `"$env:RELEASE_TAG:refs/tags/..."` 被解析成变量
+  `RELEASE_TAG:refs`（冒号并入了名字），展开为空串，refspec 变成
+  `+refs/tags//tags/v0.3.15`，git 报 `invalid refspec`。凡是要在
+  `$env:VAR` 后面紧跟冒号，必须写成 `$($env:VAR)`；`release-windows.yml`
+  的 `git fetch` refspec 就是这么写的。
 - **CLI builds must be on Windows** — `windows-sys` and `windows`
   are pulled unconditionally; cross-compilation is not configured.
 

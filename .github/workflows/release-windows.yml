@@ -82,12 +82,16 @@ jobs:
         run: |
           # 浅克隆里不一定带 tag 对象，统一显式抓取一次（tag 推送时已是同一 commit，
           # 这次 fetch 只要 1~2 秒；手动触发时才是必需步骤）
-          git fetch --depth 1 origin "+refs/tags/$env:RELEASE_TAG:refs/tags/$env:RELEASE_TAG"
+          # 必须写成 $($env:RELEASE_TAG) 而不是 $env:RELEASE_TAG：
+          # 双引号里 "$env:RELEASE_TAG:refs/..." 会被 PowerShell 解析成变量名
+          # "RELEASE_TAG:refs"（冒号被吞进名字），展开成空串，refspec 变成
+          # "+refs/tags//tags/v0.3.15"，git 直接报 invalid refspec。
+          git fetch --depth 1 origin "+refs/tags/$($env:RELEASE_TAG):refs/tags/$($env:RELEASE_TAG)"
           if ($LASTEXITCODE -ne 0) {
             Write-Error "Failed to fetch tag $env:RELEASE_TAG"
             exit 1
           }
-          git checkout --detach $env:RELEASE_TAG
+          git checkout --detach $($env:RELEASE_TAG)
           if ($LASTEXITCODE -ne 0) {
             Write-Error "Failed to checkout $env:RELEASE_TAG"
             exit 1
