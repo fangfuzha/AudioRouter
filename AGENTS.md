@@ -95,6 +95,20 @@ Main window, settings page and tray got a usability pass (v0.3.13):
 
 ## Current Status (2026-11-16)
 
+**Tray hide → show no longer kills the app.** The keyboard-focus window
+subclassing used two fixed slots (`MAIN_WNDPROC` / `KEYBOARD_WNDPROC`),
+and the focus window could be subclassed **twice**. Hiding the window and
+showing it again makes WinUI 3 rebuild the keyboard-focus window; when the
+focus switched back to the original window, the second `SetWindowLongPtrW`
+returned our own `subclass_wndproc`, which was then saved as if it were
+the original window procedure. Every message to that window recursed forever,
+the stack overflowed, and the process died with
+`STATUS_FATAL_USER_CALLBACK_EXCEPTION` (0xc000041d) — visible in the
+Windows event log as APPCRASH in `ntdll.dll` / `USER32.dll`. The
+original window procedure is now tracked per window, a window is never
+subclassed twice, and the previous focus window is restored when the focus
+moves.
+
 First-launch language now follows the system UI language:
 
 - `app_core::i18n::detect_system_locale()` reads the user's UI language via
@@ -185,6 +199,12 @@ Refactor pass complete. Key changes:
 2. **Single `windows` version** — `windows-reactor` git rev is the
    last holdout pulling the workspace's `windows 0.62` line; pin or
    vendor once a stable release is published.
+3. **窗口句柄改由框架提供** — issue #1：`windows-reactor` 暴露
+   `ReactorHost::hwnd()`（`IWindowNative::WindowHandle`）与
+   `app_window()`（`IWindow2::AppWindow`），之后可以停用
+   `EnumWindows` + 标题匹配，并进一步用 `AppWindow.Hide()/Show()`
+   取代裸 `ShowWindow`。当前 reactor 手写的 WinAppSDK 绑定还没有
+   `Hide()` / `Show()`，需要上游补齐。
 
 ## Non-Obvious Invariants
 
@@ -271,8 +291,32 @@ Refactor pass complete. Key changes:
   (`app_core::hotkey::modifier_bit`) instead of relying on `GetKeyState`.
   See `keyboard_hook()` / `install_capture_hook()` in
   `winui3_gui/src/window_utils.rs`. The window-procedure path is kept only as a
-  fallback, and each subclassed window needs its own original-wndproc slot
-  (`MAIN_WNDPROC` vs `KEYBOARD_WNDPROC`) — sharing one slot overwrites it.
+  fallback.
+- **A subclassed window may be subclassed only once, and every subclassed
+  window needs its own original-wndproc slot.** `SUBCLASSED_HWNDS` /
+  `SUBCLASSED_ORIGS` (in `winui3_gui/src/window_utils.rs`) keep one
+  original window procedure per subclassed window. Subclassing the same window
+  twice makes `SetWindowLongPtrW` return *our own* `subclass_wndproc`;
+  saving that as the "original" makes the window procedure call itself forever
+  → stack overflow → `STATUS_FATAL_USER_CALLBACK_EXCEPTION` (0xc000041d)
+  kills the process. Hiding and re-showing the window makes WinUI 3 rebuild the
+  keyboard-focus window, and the focus switching back to the previous window is
+  exactly what triggered the double subclassing. `subclass_window()`
+  therefore skips windows already in the table, `restore_subclass()` only
+  restores a window whose current wndproc is still ours (guarding against
+  HWND reuse), and `subclass_wndproc` falls back to `DefWindowProcW`
+  when a window has no recorded original.
+- **The main window handle is found by enumerating top-level windows, but only
+  ones owned by this process.** `find_hwnd()` caches the handle and
+  validates it with `IsWindow`, not `IsWindowVisible`: a hidden
+  window is still a valid handle, so the cache survives hide/show and there is
+  no full `EnumWindows` on every call while the window is hidden.
+  `enum_callback` filters by process id — another process may well have a
+  window titled "AudioRouter", and subclassing someone else's window would be
+  very bad. Getting the handle from the framework instead
+  (`IWindowNative::WindowHandle`) is tracked in issue #1;
+  `main.rs`'s single-instance activation deliberately looks across
+  processes and therefore must **not** use the PID filter.
 - **Writing state during a render does not schedule another render.** A
   `SetState::call` inside the render body updates the value but the UI keeps
   showing the previous frame, so a "clear this message" write can leave stale

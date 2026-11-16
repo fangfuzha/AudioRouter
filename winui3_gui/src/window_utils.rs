@@ -5,18 +5,20 @@ use std::sync::Arc;
 use app_core::window_placement::WindowRect;
 use parking_lot::Mutex;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, GetKeyState, RegisterHotKey, UnregisterHotKey, VK_CONTROL, VK_ESCAPE, VK_LWIN,
     VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CallWindowProcW, EnumWindows, FlashWindowEx, GetForegroundWindow,
-    GetSystemMetrics, GetWindowPlacement, GetWindowTextW, IsWindowVisible, PostMessageW,
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow,
-    UnhookWindowsHookEx, FLASHWINFO, FLASHW_ALL, GWLP_WNDPROC, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE,
-    SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_SHOW, WH_KEYBOARD_LL, WINDOWPLACEMENT, WM_CLOSE,
-    WM_EXITSIZEMOVE, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    CallNextHookEx, CallWindowProcW, DefWindowProcW, EnumWindows, FlashWindowEx,
+    GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW, GetWindowPlacement, GetWindowTextW,
+    GetWindowThreadProcessId, IsWindow, IsWindowVisible, PostMessageW, SetForegroundWindow,
+    SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx,
+    FLASHWINFO, FLASHW_ALL, GWLP_WNDPROC, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
+    SW_HIDE, SW_MAXIMIZE, SW_SHOW, WH_KEYBOARD_LL, WINDOWPLACEMENT, WM_CLOSE, WM_EXITSIZEMOVE,
+    WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_NCDESTROY, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 /// `SC_KEYMENU`：Alt（或 F10）触发的系统菜单命令。
@@ -27,8 +29,25 @@ const HOTKEY_ID: i32 = 0xA17E;
 
 static CACHED_HWND: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(true);
-/// 主窗口的原始窗口过程（与键盘焦点窗口的分开存，见 `KEYBOARD_WNDPROC`）。
-static MAIN_WNDPROC: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+/// 主窗口句柄（钩好之后记住，避免每帧重新枚举窗口）。
+static MAIN_HOOKED_HWND: AtomicUsize = AtomicUsize::new(0);
+
+/// 已被子类化的窗口及其**原始**窗口过程。
+///
+/// 必须按窗口句柄逐个记录，不能用「主窗口一个槽位、键盘焦点窗口另一个
+/// 槽位」这种固定槽位：同一个窗口被二次子类化时，`SetWindowLongPtrW`
+/// 返回的是我们自己刚装上去的 `subclass_wndproc`，一旦把它当成「原始
+/// 窗口过程」保存下来，该窗口之后的每一条消息都会让窗口过程无限递归，
+/// 栈溢出后进程以 STATUS_FATAL_USER_CALLBACK_EXCEPTION(0xc000041d) 崩溃。
+///
+/// 隐藏再显示窗口时，WinUI 3 的键盘焦点窗口会重建，焦点切回原窗口就会
+/// 触发二次子类化——这正是崩溃的触发路径。
+const MAX_SUBCLASSED: usize = 8;
+static SUBCLASSED_COUNT: AtomicUsize = AtomicUsize::new(0);
+static SUBCLASSED_HWNDS: [AtomicUsize; MAX_SUBCLASSED] =
+    [const { AtomicUsize::new(0) }; MAX_SUBCLASSED];
+static SUBCLASSED_ORIGS: [AtomicUsize; MAX_SUBCLASSED] =
+    [const { AtomicUsize::new(0) }; MAX_SUBCLASSED];
 /// 窗口位置是否已经恢复（或本来就没有需要恢复的值）。
 static PLACEMENT_RESTORED: AtomicBool = AtomicBool::new(false);
 /// 启动时应保持隐藏（「启动时最小化」或 `--minimized`）。
@@ -59,9 +78,16 @@ static CAPTURE_HOOK: AtomicUsize = AtomicUsize::new(0);
 /// 录制期间自己累计的修饰键状态。
 static CAPTURE_MODIFIERS: AtomicU32 = AtomicU32::new(0);
 /// 键盘焦点所在窗口（WinUI 3 用一个隐藏窗口接收键盘输入）。
-static KEYBOARD_WNDPROC: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static KEYBOARD_HWND: AtomicUsize = AtomicUsize::new(0);
 unsafe extern "system" fn enum_callback(hwnd: HWND, _lparam: LPARAM) -> i32 {
+    // 只认本进程的窗口：别的进程也可能有一个叫 AudioRouter 的窗口，
+    // 认错了会拿 SetWindowLongPtrW 去子类化**别人的窗口**。
+    let mut owner_pid: u32 = 0;
+    GetWindowThreadProcessId(hwnd, &mut owner_pid);
+    if owner_pid != GetCurrentProcessId() {
+        return 1;
+    }
+
     let mut buf = [0u16; 256];
     let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), 256);
     if len > 0 {
@@ -78,7 +104,10 @@ fn find_hwnd() -> Option<HWND> {
     let cached = CACHED_HWND.load(Ordering::SeqCst);
     if !cached.is_null() {
         unsafe {
-            if IsWindowVisible(cached) != 0 {
+            // 句柄还有没有效用 IsWindow 判断，可见性用 IsWindowVisible 判断。
+            // 窗口隐藏时 IsWindow 依然为真，句柄是稳定标识，没必要重新枚举
+            // （否则隐藏期间每次调用都要全量 EnumWindows）。
+            if IsWindow(cached) != 0 {
                 return Some(cached);
             }
         }
@@ -131,28 +160,126 @@ unsafe extern "system" fn subclass_wndproc(
         save_window_placement(hwnd);
     }
 
-    // 主窗口和键盘焦点窗口各自有自己的原始窗口过程，不能共用一个槽位：
-    // 后子类化的窗口会把先前的那个覆盖掉，消息就会被派发到错误的窗口过程。
-    let orig = if hwnd as usize == KEYBOARD_HWND.load(Ordering::SeqCst) {
-        KEYBOARD_WNDPROC.load(Ordering::SeqCst) as isize
-    } else {
-        MAIN_WNDPROC.load(Ordering::SeqCst) as isize
+    // 每个窗口都必须用**自己**的原始窗口过程来派发消息：
+    // 共用槽位会把消息派给别的窗口，二次子类化则会把「我们自己」当成原始
+    // 过程，造成无限递归 → 栈溢出 → 0xc000041d 崩溃。
+    let orig = lookup_orig(hwnd as usize);
+    let result = match orig {
+        Some(orig) => unsafe {
+            CallWindowProcW(
+                Some(std::mem::transmute::<
+                    isize,
+                    unsafe extern "system" fn(*mut std::ffi::c_void, u32, usize, isize) -> isize,
+                >(orig as isize)),
+                hwnd,
+                msg,
+                wparam,
+                lparam,
+            )
+        },
+        // 没有记录到原始窗口过程时不能瞎猜（否则消息会被派发到别的窗口），
+        // 交给系统默认处理。
+        None => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     };
-    if orig == 0 {
-        return 0;
+
+    // 窗口销毁后不再保留它的槽位。
+    if msg == WM_NCDESTROY {
+        forget_subclass(hwnd as usize);
     }
-    CallWindowProcW(
-        Some(unsafe {
-            std::mem::transmute::<
-                isize,
-                unsafe extern "system" fn(*mut std::ffi::c_void, u32, usize, isize) -> isize,
-            >(orig)
-        }),
-        hwnd,
-        msg,
-        wparam,
-        lparam,
-    )
+
+    result
+}
+
+/// 查找窗口对应的子类化槽位。
+fn subclass_slot(hwnd: usize) -> Option<usize> {
+    let count = SUBCLASSED_COUNT.load(Ordering::SeqCst).min(MAX_SUBCLASSED);
+    (0..count).find(|&i| SUBCLASSED_HWNDS[i].load(Ordering::SeqCst) == hwnd)
+}
+
+/// 查出窗口自己的原始窗口过程。
+fn lookup_orig(hwnd: usize) -> Option<usize> {
+    let slot = subclass_slot(hwnd)?;
+    let orig = SUBCLASSED_ORIGS[slot].load(Ordering::SeqCst);
+    (orig != 0).then_some(orig)
+}
+
+/// 记录「窗口 → 原始窗口过程」。
+///
+/// 已经记过的窗口**保留最初**的原始窗口过程，不允许被后来的调用覆盖：
+/// 覆盖成我们自己的过程就会让窗口过程无限递归。
+fn record_subclass(hwnd: usize, orig: usize) -> bool {
+    if subclass_slot(hwnd).is_some() {
+        return true;
+    }
+    let count = SUBCLASSED_COUNT.load(Ordering::SeqCst);
+    if count >= MAX_SUBCLASSED {
+        return false;
+    }
+    SUBCLASSED_HWNDS[count].store(hwnd, Ordering::SeqCst);
+    SUBCLASSED_ORIGS[count].store(orig, Ordering::SeqCst);
+    SUBCLASSED_COUNT.store(count + 1, Ordering::SeqCst);
+    true
+}
+
+/// 丢弃窗口的子类化记录（窗口销毁时调用）。
+fn forget_subclass(hwnd: usize) {
+    let Some(slot) = subclass_slot(hwnd) else {
+        return;
+    };
+    let count = SUBCLASSED_COUNT.load(Ordering::SeqCst);
+    if count == 0 {
+        return;
+    }
+    let last = count - 1;
+    if slot != last {
+        SUBCLASSED_HWNDS[slot].store(
+            SUBCLASSED_HWNDS[last].load(Ordering::SeqCst),
+            Ordering::SeqCst,
+        );
+        SUBCLASSED_ORIGS[slot].store(
+            SUBCLASSED_ORIGS[last].load(Ordering::SeqCst),
+            Ordering::SeqCst,
+        );
+    }
+    SUBCLASSED_HWNDS[last].store(0, Ordering::SeqCst);
+    SUBCLASSED_ORIGS[last].store(0, Ordering::SeqCst);
+    SUBCLASSED_COUNT.store(last, Ordering::SeqCst);
+}
+
+/// 给窗口装上子类钩子，并记住它自己的原始窗口过程。
+///
+/// 已经子类化过的窗口直接返回：重复设置会让 `SetWindowLongPtrW` 返回
+/// 我们自己刚装上去的过程，原始过程就此丢失。
+unsafe fn subclass_window(hwnd: HWND) {
+    let addr = hwnd as usize;
+    if subclass_slot(addr).is_some() {
+        return;
+    }
+    let prev = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, subclass_wndproc as *const () as isize)
+        as *mut c_void;
+    if prev.is_null() {
+        return;
+    }
+    if !record_subclass(addr, prev as usize) {
+        // 没有空槽位了：撤销子类化，别把窗口过程留成我们的。
+        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, prev as isize);
+        log::warn!("Subclass table full, window {addr} left untouched");
+    }
+}
+
+/// 撤销窗口的子类化，把它自己的窗口过程还回去。
+unsafe fn restore_subclass(hwnd: usize) {
+    let Some(slot) = subclass_slot(hwnd) else {
+        return;
+    };
+    let orig = SUBCLASSED_ORIGS[slot].load(Ordering::SeqCst);
+    // 只有当这个句柄上的窗口过程还是我们装的那个时才还原：
+    // 窗口销毁后句柄可能被系统回收给别的窗口，乱改会破坏它。
+    let current = GetWindowLongPtrW(hwnd as *mut c_void, GWLP_WNDPROC);
+    if orig != 0 && current == subclass_wndproc as *const () as isize {
+        SetWindowLongPtrW(hwnd as *mut c_void, GWLP_WNDPROC, orig as isize);
+    }
+    forget_subclass(hwnd);
 }
 
 /// 安装窗口子类钩子：处理「关闭到托盘」和窗口位置记忆。
@@ -161,7 +288,7 @@ unsafe extern "system" fn subclass_wndproc(
 /// 这里允许重复调用：装好之后立刻返回（只读几个原子变量），
 /// 未装好时继续找窗口，直到找到为止。
 pub fn install_window_hooks() {
-    if !MAIN_WNDPROC.load(Ordering::SeqCst).is_null() {
+    if MAIN_HOOKED_HWND.load(Ordering::SeqCst) != 0 {
         // 主窗口已经钩好，但键盘焦点可能落在另一个窗口上，
         // 仍然要继续检查。
         subclass_keyboard_focus_window();
@@ -173,10 +300,9 @@ pub fn install_window_hooks() {
     };
 
     unsafe {
-        let prev = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, subclass_wndproc as *const () as isize)
-            as *mut c_void;
-        MAIN_WNDPROC.store(prev, Ordering::SeqCst);
+        subclass_window(hwnd);
     }
+    MAIN_HOOKED_HWND.store(hwnd as usize, Ordering::SeqCst);
     log::info!("Window hooks installed (close-to-tray + placement tracking)");
     subclass_keyboard_focus_window();
 }
@@ -204,11 +330,20 @@ fn subclass_keyboard_focus_window() {
     if KEYBOARD_HWND.load(Ordering::SeqCst) == focus_addr {
         return;
     }
+
+    // 焦点换到了另一个窗口：先把上一个焦点窗口的窗口过程恢复回去。
+    // 否则它会继续挂着我们的子类，而槽位里记的又是别的窗口的原始过程，
+    // 消息就会被派发到错误的窗口过程上；焦点再切回来时也会变成二次
+    // 子类化，把我们自己当成「原始窗口过程」保存下来。
+    let previous = KEYBOARD_HWND.swap(focus_addr, Ordering::SeqCst);
+    if previous != 0 {
+        unsafe {
+            restore_subclass(previous);
+        }
+    }
+
     unsafe {
-        let prev = SetWindowLongPtrW(focus, GWLP_WNDPROC, subclass_wndproc as *const () as isize)
-            as *mut c_void;
-        KEYBOARD_WNDPROC.store(prev, Ordering::SeqCst);
-        KEYBOARD_HWND.store(focus_addr, Ordering::SeqCst);
+        subclass_window(focus);
     }
     log::info!("Keyboard focus window {focus_addr} subclassed for hotkey capture");
 }
@@ -685,5 +820,52 @@ pub fn toggle_window() {
                 let _ = SetForegroundWindow(hwnd);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 子类化登记表的核心不变量：同一个窗口的「原始窗口过程」只能有
+    /// 一个，而且第一次记录的那个必须一直保留。
+    ///
+    /// 崩溃（0xc000041d）就是这条不变量被破坏造成的：二次子类化时
+    /// SetWindowLongPtrW 返回的是我们自己装上去的过程，被当成原始过程
+    /// 保存后，窗口过程会无限递归。
+    #[test]
+    fn subclass_registry_keeps_first_original() {
+        let hwnd = 0x1234_5678usize;
+        forget_subclass(hwnd);
+
+        assert!(record_subclass(hwnd, 0xAAAA));
+        assert_eq!(lookup_orig(hwnd), Some(0xAAAA));
+
+        // 二次记录（错误路径）不能覆盖最初的原始窗口过程
+        assert!(record_subclass(hwnd, 0xBBBB));
+        assert_eq!(lookup_orig(hwnd), Some(0xAAAA));
+
+        forget_subclass(hwnd);
+        assert_eq!(lookup_orig(hwnd), None);
+    }
+
+    /// 不同窗口各自记着自己的原始窗口过程，互不干扰。
+    #[test]
+    fn subclass_registry_keeps_windows_separate() {
+        let a = 0xAAAA_0001usize;
+        let b = 0xBBBB_0002usize;
+        forget_subclass(a);
+        forget_subclass(b);
+
+        assert!(record_subclass(a, 0x1111));
+        assert!(record_subclass(b, 0x2222));
+        assert_eq!(lookup_orig(a), Some(0x1111));
+        assert_eq!(lookup_orig(b), Some(0x2222));
+
+        forget_subclass(a);
+        assert_eq!(lookup_orig(a), None);
+        assert_eq!(lookup_orig(b), Some(0x2222));
+
+        forget_subclass(b);
     }
 }
