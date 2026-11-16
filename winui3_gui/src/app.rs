@@ -237,6 +237,45 @@ impl Component for RootComponent {
         let (nav_selected, set_nav_selected) = cx.use_state(NAV_TAG_HOME.to_string());
         // 设置页的内联错误提示（保存失败 / 热键被占用等）。
         let (settings_error, set_settings_error) = cx.use_state(None::<String>);
+        // 快捷键录制提示（例如「至少要包含一个修饰键」）。
+        let (hotkey_status, set_hotkey_status) = cx.use_state(None::<String>);
+
+        // 快捷键捕获结果：窗口过程（UI 线程）把捕获到的组合键写进来，
+        // 这里取走并写进设置草稿。
+        // 注意：渲染过程中改 state 不会立刻触发一次重绘，所以这里不能
+        // 只依赖 state —— 还要就地算出「本次渲染该显示什么」，否则上一条
+        // 错误提示（例如「需要修饰键」）会在捕获成功后仍然残留在界面上。
+        let mut effective_hotkey_status = hotkey_status.clone();
+        if let Some(result) = window_utils::take_capture_result() {
+            match result {
+                window_utils::CaptureResult::Captured(hotkey) => {
+                    {
+                        let mut c = self.controller.lock();
+                        c.draft_general.global_hotkey = hotkey;
+                    }
+                    effective_hotkey_status = None;
+                    set_hotkey_status.call(None);
+                }
+                window_utils::CaptureResult::NeedsModifier => {
+                    let text = {
+                        let c = self.controller.lock();
+                        c.i18n.t("HotkeyNeedsModifier").to_string()
+                    };
+                    effective_hotkey_status = Some(text.clone());
+                    set_hotkey_status.call(Some(text));
+                }
+            }
+        }
+
+        // 捕获到组合键后请求一次重绘（回调发生在 UI 线程的窗口过程里）。
+        cx.use_effect((), {
+            let render_request = render_request.clone();
+            move || {
+                window_utils::set_capture_listener(Arc::new(move || {
+                    render_request.request();
+                }));
+            }
+        });
 
         let (theme_choice, set_theme_choice) = cx.use_state(ThemeChoice::FollowSystem);
         cx.use_effect((), || {
@@ -338,6 +377,7 @@ impl Component for RootComponent {
             Arc::clone(&self.update_state),
             settings_error,
             set_settings_error,
+            effective_hotkey_status,
         )
     }
 }
@@ -355,6 +395,7 @@ fn main_app(
     update_state: Arc<Mutex<UpdateState>>,
     settings_error: Option<String>,
     set_settings_error: SetState<Option<String>>,
+    hotkey_status: Option<String>,
 ) -> Element {
     let c = controller.lock();
     let i18n = c.i18n.clone();
@@ -404,6 +445,7 @@ fn main_app(
             Arc::clone(&update_state),
             settings_error.clone(),
             set_settings_error.clone(),
+            hotkey_status.clone(),
         )
     } else {
         home_page(Arc::clone(&controller), i18n.clone(), make_setter.clone())
@@ -461,6 +503,7 @@ fn main_app(
             .on_selection_changed(move |tag: String| {
                 log::info!("NavigationView selection changed, tag={tag:?}");
                 if tag == NAV_TAG_HOME {
+                    window_utils::cancel_hotkey_capture();
                     let mut c = controller_for_handler.lock();
                     c.begin_settings_edit();
                     set_nav_selected_for_handler.call(NAV_TAG_HOME.to_string());
@@ -469,6 +512,7 @@ fn main_app(
                     // 点击 GitHub 项不真正切换页面，弹回之前选中的项
                     set_nav_selected_for_handler.call(nav_selected_for_handler.clone());
                 } else {
+                    window_utils::cancel_hotkey_capture();
                     let mut c = controller_for_handler.lock();
                     c.begin_settings_edit();
                     set_nav_selected_for_handler.call(NAV_TAG_SETTINGS.to_string());
@@ -874,6 +918,7 @@ fn settings_page(
     update_state: Arc<Mutex<UpdateState>>,
     settings_error: Option<String>,
     set_settings_error: SetState<Option<String>>,
+    hotkey_status: Option<String>,
 ) -> Element {
     let (
         start_with_windows,
@@ -933,9 +978,53 @@ fn settings_page(
         i18n.t("BackdropAcrylic").to_string(),
     ];
 
+    // 快捷键录制：点「录制」进入捕获状态，之后直接按下组合键即可。
+    let capturing = window_utils::hotkey_capture_active();
+    let record_click = {
+        let refresh = make_setter.clone();
+        move || {
+            if window_utils::hotkey_capture_active() {
+                window_utils::cancel_hotkey_capture();
+            } else {
+                window_utils::arm_hotkey_capture();
+            }
+            refresh();
+        }
+    };
+    let record_button = {
+        let btn = button(if capturing {
+            i18n.t("HotkeyRecording")
+        } else {
+            i18n.t("HotkeyRecord")
+        });
+        let btn = if capturing { btn.accent() } else { btn };
+        btn.on_click(record_click)
+    };
+    let clear_click = {
+        let controller = Arc::clone(&controller);
+        let refresh = make_setter.clone();
+        move || {
+            controller.lock().draft_general.global_hotkey = String::new();
+            refresh();
+        }
+    };
+    let clear_button = button(i18n.t("HotkeyClear")).on_click(clear_click);
+
+    // 快捷键下方的提示：错误优先（刚捕获失败时最需要看到），
+    // 其次是录制中的引导，最后是常规说明。
+    let hotkey_hint = if let Some(status) = hotkey_status.as_ref() {
+        status.clone()
+    } else if capturing {
+        i18n.t("HotkeyRecordHint").to_string()
+    } else {
+        i18n.t("HotkeyHint").to_string()
+    };
+
     let back_ctrl = controller.clone();
     let back_nav = set_nav_selected.clone();
     let cancel_btn = button(i18n.t("Cancel")).on_click(move || {
+        // 离开设置页时结束快捷键录制，避免继续吞掉键盘输入。
+        window_utils::cancel_hotkey_capture();
         let mut c = back_ctrl.lock();
         c.begin_settings_edit();
         back_nav.call(NAV_TAG_HOME.to_string());
@@ -947,6 +1036,8 @@ fn settings_page(
     let set_error = set_settings_error.clone();
     let save_i18n = i18n.clone();
     let save_btn = button(i18n.t("Save")).accent().on_click(move || {
+        // 保存时结束录制，避免之后的按键被当成快捷键。
+        window_utils::cancel_hotkey_capture();
         let mut c = save_controller.lock();
 
         // 先单独校验全局热键，给出明确的格式错误提示，
@@ -1081,16 +1172,36 @@ fn settings_page(
                             }
                         }),
                 ),
+                // 「打开窗口快捷键」：可以直接输入，也可以点「录制」
+                // 后直接按下组合键（窗口过程会把按键翻译成 Ctrl+Alt+M）。
                 Element::from(
-                    text_box(global_hotkey)
-                        .header(i18n.t("GlobalHotkey"))
-                        .placeholder_text(i18n.t("HotkeyPlaceholder"))
-                        .on_text_changed({
-                            let controller_clone = Arc::clone(&controller);
-                            move |value| {
-                                controller_clone.lock().draft_general.global_hotkey = value;
-                            }
-                        }),
+                    vstack((
+                        Element::from(text_block(i18n.t("GlobalHotkey")).bold()),
+                        Element::from(
+                            grid((
+                                Element::from(
+                                    text_box(global_hotkey)
+                                        .placeholder_text(i18n.t("HotkeyPlaceholder"))
+                                        .on_text_changed({
+                                            let controller_clone = Arc::clone(&controller);
+                                            move |value| {
+                                                controller_clone
+                                                    .lock()
+                                                    .draft_general
+                                                    .global_hotkey = value;
+                                            }
+                                        }),
+                                )
+                                .grid_column(0),
+                                Element::from(record_button).grid_column(1),
+                                Element::from(clear_button).grid_column(2),
+                            ))
+                            .columns([GridLength::STAR, GridLength::Auto, GridLength::Auto])
+                            .column_spacing(8.0),
+                        ),
+                        Element::from(text_block(hotkey_hint).font_size(12.0).opacity(0.7)),
+                    ))
+                    .spacing(4.0),
                 ),
                 Element::from(
                     hstack((
