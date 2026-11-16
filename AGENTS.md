@@ -199,7 +199,8 @@ Refactor pass complete. Key changes:
 2. **Single `windows` version** — `windows-reactor` git rev is the
    last holdout pulling the workspace's `windows 0.62` line; pin or
    vendor once a stable release is published.
-3. **窗口句柄改由框架提供** — issue #1：`windows-reactor` 暴露
+3. **窗口句柄改由框架提供** — 上游 issue microsoft/windows-rs#5388：
+   `windows-reactor` 暴露
    `ReactorHost::hwnd()`（`IWindowNative::WindowHandle`）与
    `app_window()`（`IWindow2::AppWindow`），之后可以停用
    `EnumWindows` + 标题匹配，并进一步用 `AppWindow.Hide()/Show()`
