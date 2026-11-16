@@ -294,9 +294,11 @@ Refactor pass complete. Key changes:
   `winui3_gui/src/window_utils.rs`. The window-procedure path is kept only as a
   fallback.
 - **A subclassed window may be subclassed only once, and every subclassed
-  window needs its own original-wndproc slot.** `SUBCLASSED_HWNDS` /
-  `SUBCLASSED_ORIGS` (in `winui3_gui/src/window_utils.rs`) keep one
-  original window procedure per subclassed window. Subclassing the same window
+  window needs its own original-wndproc slot.** `SubclassRegistry` (in
+  `winui3_gui/src/window_utils.rs`) keeps one original window procedure per
+  subclassed window; the production code uses the global `REGISTRY`
+  instance, tests must use their own instance (Rust runs tests in parallel, and
+  the registry is not safe to share across threads). Subclassing the same window
   twice makes `SetWindowLongPtrW` return *our own* `subclass_wndproc`;
   saving that as the "original" makes the window procedure call itself forever
   → stack overflow → `STATUS_FATAL_USER_CALLBACK_EXCEPTION` (0xc000041d)

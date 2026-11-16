@@ -32,7 +32,10 @@ static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(true);
 /// 主窗口句柄（钩好之后记住，避免每帧重新枚举窗口）。
 static MAIN_HOOKED_HWND: AtomicUsize = AtomicUsize::new(0);
 
-/// 已被子类化的窗口及其**原始**窗口过程。
+/// 最多同时记录多少个被子类化的窗口（主窗口 + 键盘焦点窗口）。
+const MAX_SUBCLASSED: usize = 8;
+
+/// 已被子类化的窗口及其**原始**窗口过程登记表。
 ///
 /// 必须按窗口句柄逐个记录，不能用「主窗口一个槽位、键盘焦点窗口另一个
 /// 槽位」这种固定槽位：同一个窗口被二次子类化时，`SetWindowLongPtrW`
@@ -42,12 +45,90 @@ static MAIN_HOOKED_HWND: AtomicUsize = AtomicUsize::new(0);
 ///
 /// 隐藏再显示窗口时，WinUI 3 的键盘焦点窗口会重建，焦点切回原窗口就会
 /// 触发二次子类化——这正是崩溃的触发路径。
-const MAX_SUBCLASSED: usize = 8;
-static SUBCLASSED_COUNT: AtomicUsize = AtomicUsize::new(0);
-static SUBCLASSED_HWNDS: [AtomicUsize; MAX_SUBCLASSED] =
-    [const { AtomicUsize::new(0) }; MAX_SUBCLASSED];
-static SUBCLASSED_ORIGS: [AtomicUsize; MAX_SUBCLASSED] =
-    [const { AtomicUsize::new(0) }; MAX_SUBCLASSED];
+///
+/// 登记（`record`）用 CAS 预留槽位，多个线程同时登记不会互相覆盖；
+/// 回收（`forget`）会移动表内元素，只在 UI 线程上调用。
+struct SubclassRegistry {
+    count: AtomicUsize,
+    hwnds: [AtomicUsize; MAX_SUBCLASSED],
+    origs: [AtomicUsize; MAX_SUBCLASSED],
+}
+
+impl SubclassRegistry {
+    const fn new() -> Self {
+        Self {
+            count: AtomicUsize::new(0),
+            hwnds: [const { AtomicUsize::new(0) }; MAX_SUBCLASSED],
+            origs: [const { AtomicUsize::new(0) }; MAX_SUBCLASSED],
+        }
+    }
+
+    /// 查找窗口对应的槽位。
+    fn slot(&self, hwnd: usize) -> Option<usize> {
+        let count = self.count.load(Ordering::SeqCst).min(MAX_SUBCLASSED);
+        (0..count).find(|&i| self.hwnds[i].load(Ordering::SeqCst) == hwnd)
+    }
+
+    /// 查出窗口自己的原始窗口过程。
+    fn lookup(&self, hwnd: usize) -> Option<usize> {
+        let slot = self.slot(hwnd)?;
+        let orig = self.origs[slot].load(Ordering::SeqCst);
+        (orig != 0).then_some(orig)
+    }
+
+    /// 记录「窗口 → 原始窗口过程」。
+    ///
+    /// 已经记过的窗口**保留最初**的原始窗口过程，不允许被后来的调用覆盖：
+    /// 覆盖成我们自己的过程就会让窗口过程无限递归。
+    fn record(&self, hwnd: usize, orig: usize) -> bool {
+        if self.slot(hwnd).is_some() {
+            return true;
+        }
+        // CAS 预留槽位：并发登记时不会互相覆盖（曾经用「读 count 再写
+        // count+1」，两个线程会抢到同一个槽位，把彼此的记录冲掉）。
+        let mut count = self.count.load(Ordering::SeqCst);
+        loop {
+            if count >= MAX_SUBCLASSED {
+                return false;
+            }
+            match self.count.compare_exchange_weak(
+                count,
+                count + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    self.hwnds[count].store(hwnd, Ordering::SeqCst);
+                    self.origs[count].store(orig, Ordering::SeqCst);
+                    return true;
+                }
+                Err(actual) => count = actual,
+            }
+        }
+    }
+
+    /// 丢弃窗口的记录（窗口销毁时调用）。
+    fn forget(&self, hwnd: usize) {
+        let Some(slot) = self.slot(hwnd) else {
+            return;
+        };
+        let count = self.count.load(Ordering::SeqCst);
+        if count == 0 {
+            return;
+        }
+        let last = count - 1;
+        if slot != last {
+            self.hwnds[slot].store(self.hwnds[last].load(Ordering::SeqCst), Ordering::SeqCst);
+            self.origs[slot].store(self.origs[last].load(Ordering::SeqCst), Ordering::SeqCst);
+        }
+        self.hwnds[last].store(0, Ordering::SeqCst);
+        self.origs[last].store(0, Ordering::SeqCst);
+        self.count.store(last, Ordering::SeqCst);
+    }
+}
+
+/// 全局登记表。生产代码只在 UI 线程（渲染回调与窗口过程）上访问它。
+static REGISTRY: SubclassRegistry = SubclassRegistry::new();
 /// 窗口位置是否已经恢复（或本来就没有需要恢复的值）。
 static PLACEMENT_RESTORED: AtomicBool = AtomicBool::new(false);
 /// 启动时应保持隐藏（「启动时最小化」或 `--minimized`）。
@@ -163,7 +244,7 @@ unsafe extern "system" fn subclass_wndproc(
     // 每个窗口都必须用**自己**的原始窗口过程来派发消息：
     // 共用槽位会把消息派给别的窗口，二次子类化则会把「我们自己」当成原始
     // 过程，造成无限递归 → 栈溢出 → 0xc000041d 崩溃。
-    let orig = lookup_orig(hwnd as usize);
+    let orig = REGISTRY.lookup(hwnd as usize);
     let result = match orig {
         Some(orig) => unsafe {
             CallWindowProcW(
@@ -184,66 +265,10 @@ unsafe extern "system" fn subclass_wndproc(
 
     // 窗口销毁后不再保留它的槽位。
     if msg == WM_NCDESTROY {
-        forget_subclass(hwnd as usize);
+        REGISTRY.forget(hwnd as usize);
     }
 
     result
-}
-
-/// 查找窗口对应的子类化槽位。
-fn subclass_slot(hwnd: usize) -> Option<usize> {
-    let count = SUBCLASSED_COUNT.load(Ordering::SeqCst).min(MAX_SUBCLASSED);
-    (0..count).find(|&i| SUBCLASSED_HWNDS[i].load(Ordering::SeqCst) == hwnd)
-}
-
-/// 查出窗口自己的原始窗口过程。
-fn lookup_orig(hwnd: usize) -> Option<usize> {
-    let slot = subclass_slot(hwnd)?;
-    let orig = SUBCLASSED_ORIGS[slot].load(Ordering::SeqCst);
-    (orig != 0).then_some(orig)
-}
-
-/// 记录「窗口 → 原始窗口过程」。
-///
-/// 已经记过的窗口**保留最初**的原始窗口过程，不允许被后来的调用覆盖：
-/// 覆盖成我们自己的过程就会让窗口过程无限递归。
-fn record_subclass(hwnd: usize, orig: usize) -> bool {
-    if subclass_slot(hwnd).is_some() {
-        return true;
-    }
-    let count = SUBCLASSED_COUNT.load(Ordering::SeqCst);
-    if count >= MAX_SUBCLASSED {
-        return false;
-    }
-    SUBCLASSED_HWNDS[count].store(hwnd, Ordering::SeqCst);
-    SUBCLASSED_ORIGS[count].store(orig, Ordering::SeqCst);
-    SUBCLASSED_COUNT.store(count + 1, Ordering::SeqCst);
-    true
-}
-
-/// 丢弃窗口的子类化记录（窗口销毁时调用）。
-fn forget_subclass(hwnd: usize) {
-    let Some(slot) = subclass_slot(hwnd) else {
-        return;
-    };
-    let count = SUBCLASSED_COUNT.load(Ordering::SeqCst);
-    if count == 0 {
-        return;
-    }
-    let last = count - 1;
-    if slot != last {
-        SUBCLASSED_HWNDS[slot].store(
-            SUBCLASSED_HWNDS[last].load(Ordering::SeqCst),
-            Ordering::SeqCst,
-        );
-        SUBCLASSED_ORIGS[slot].store(
-            SUBCLASSED_ORIGS[last].load(Ordering::SeqCst),
-            Ordering::SeqCst,
-        );
-    }
-    SUBCLASSED_HWNDS[last].store(0, Ordering::SeqCst);
-    SUBCLASSED_ORIGS[last].store(0, Ordering::SeqCst);
-    SUBCLASSED_COUNT.store(last, Ordering::SeqCst);
 }
 
 /// 给窗口装上子类钩子，并记住它自己的原始窗口过程。
@@ -252,7 +277,7 @@ fn forget_subclass(hwnd: usize) {
 /// 我们自己刚装上去的过程，原始过程就此丢失。
 unsafe fn subclass_window(hwnd: HWND) {
     let addr = hwnd as usize;
-    if subclass_slot(addr).is_some() {
+    if REGISTRY.slot(addr).is_some() {
         return;
     }
     let prev = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, subclass_wndproc as *const () as isize)
@@ -260,7 +285,7 @@ unsafe fn subclass_window(hwnd: HWND) {
     if prev.is_null() {
         return;
     }
-    if !record_subclass(addr, prev as usize) {
+    if !REGISTRY.record(addr, prev as usize) {
         // 没有空槽位了：撤销子类化，别把窗口过程留成我们的。
         SetWindowLongPtrW(hwnd, GWLP_WNDPROC, prev as isize);
         log::warn!("Subclass table full, window {addr} left untouched");
@@ -269,17 +294,17 @@ unsafe fn subclass_window(hwnd: HWND) {
 
 /// 撤销窗口的子类化，把它自己的窗口过程还回去。
 unsafe fn restore_subclass(hwnd: usize) {
-    let Some(slot) = subclass_slot(hwnd) else {
+    let Some(slot) = REGISTRY.slot(hwnd) else {
         return;
     };
-    let orig = SUBCLASSED_ORIGS[slot].load(Ordering::SeqCst);
+    let orig = REGISTRY.origs[slot].load(Ordering::SeqCst);
     // 只有当这个句柄上的窗口过程还是我们装的那个时才还原：
     // 窗口销毁后句柄可能被系统回收给别的窗口，乱改会破坏它。
     let current = GetWindowLongPtrW(hwnd as *mut c_void, GWLP_WNDPROC);
     if orig != 0 && current == subclass_wndproc as *const () as isize {
         SetWindowLongPtrW(hwnd as *mut c_void, GWLP_WNDPROC, orig as isize);
     }
-    forget_subclass(hwnd);
+    REGISTRY.forget(hwnd);
 }
 
 /// 安装窗口子类钩子：处理「关闭到托盘」和窗口位置记忆。
@@ -833,39 +858,41 @@ mod tests {
     /// 崩溃（0xc000041d）就是这条不变量被破坏造成的：二次子类化时
     /// SetWindowLongPtrW 返回的是我们自己装上去的过程，被当成原始过程
     /// 保存后，窗口过程会无限递归。
+    ///
+    /// 每个用例用自己的登记表实例：Rust 的测试默认并行执行，共用全局
+    /// 那张表会互相踩（曾经就这么把 CI 跑挂过一次）。
     #[test]
     fn subclass_registry_keeps_first_original() {
+        let registry = SubclassRegistry::new();
         let hwnd = 0x1234_5678usize;
-        forget_subclass(hwnd);
 
-        assert!(record_subclass(hwnd, 0xAAAA));
-        assert_eq!(lookup_orig(hwnd), Some(0xAAAA));
+        assert!(registry.record(hwnd, 0xAAAA));
+        assert_eq!(registry.lookup(hwnd), Some(0xAAAA));
 
         // 二次记录（错误路径）不能覆盖最初的原始窗口过程
-        assert!(record_subclass(hwnd, 0xBBBB));
-        assert_eq!(lookup_orig(hwnd), Some(0xAAAA));
+        assert!(registry.record(hwnd, 0xBBBB));
+        assert_eq!(registry.lookup(hwnd), Some(0xAAAA));
 
-        forget_subclass(hwnd);
-        assert_eq!(lookup_orig(hwnd), None);
+        registry.forget(hwnd);
+        assert_eq!(registry.lookup(hwnd), None);
     }
 
     /// 不同窗口各自记着自己的原始窗口过程，互不干扰。
     #[test]
     fn subclass_registry_keeps_windows_separate() {
+        let registry = SubclassRegistry::new();
         let a = 0xAAAA_0001usize;
         let b = 0xBBBB_0002usize;
-        forget_subclass(a);
-        forget_subclass(b);
 
-        assert!(record_subclass(a, 0x1111));
-        assert!(record_subclass(b, 0x2222));
-        assert_eq!(lookup_orig(a), Some(0x1111));
-        assert_eq!(lookup_orig(b), Some(0x2222));
+        assert!(registry.record(a, 0x1111));
+        assert!(registry.record(b, 0x2222));
+        assert_eq!(registry.lookup(a), Some(0x1111));
+        assert_eq!(registry.lookup(b), Some(0x2222));
 
-        forget_subclass(a);
-        assert_eq!(lookup_orig(a), None);
-        assert_eq!(lookup_orig(b), Some(0x2222));
+        registry.forget(a);
+        assert_eq!(registry.lookup(a), None);
+        assert_eq!(registry.lookup(b), Some(0x2222));
 
-        forget_subclass(b);
+        registry.forget(b);
     }
 }
