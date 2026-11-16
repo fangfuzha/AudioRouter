@@ -356,6 +356,10 @@ pushing a `v*` tag and uploads an Inno Setup installer to a GitHub Release.
 4. `git tag v<version> && git push origin v<version>` → the release workflow
    builds `cargo build --locked --release`, so `Cargo.lock` must be
    committed and consistent with the manifests.
+5. tag 推送触发的发布失败时，不必删 tag 重来：修好 workflow 后用
+   `gh workflow run release-windows.yml -f tag=v<version>` 手动重跑即可。
+   手动触发用的是 **main 分支上的 workflow 文件**，但构建内容仍然取自
+   tag（`Checkout release tag` 步骤会 fetch 并 checkout 该 tag）。
 
 已发布的版本历史见 `git tag --sort=-creatordate`。
 
@@ -395,6 +399,7 @@ pushing a `v*` tag and uploads an Inno Setup installer to a GitHub Release.
   里一条 sccache 条目都留不下，命中永远是 0 —— 只剩每次编译多一次远端
   查找的开销。v0.0.11 起会导出该变量，workflow 里也显式写了
   `ACTIONS_CACHE_SERVICE_V2: "on"`，防止 action 版本回退。
+  修好后实测：CI 两个 job 命中 126~128 次、miss 只剩 6~7 次（修复前是 0 命中）。
   该版本只认 `version` / `token` / `disable_annotations` 三个输入，没有
   `fail-on-cache-err`（写了是空转，每轮还会刷一条 `Unexpected input` 警告）。
 
