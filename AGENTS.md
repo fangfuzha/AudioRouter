@@ -87,7 +87,11 @@ DLL 就地在 exe 旁边，`.pri` 缺失则**窗口创建失败后静默退出**
 | 模式 | 开关 | 安装包内容 | 运行时来源 |
 |---|---|---|---|
 | 自包含（默认发布形态） | 默认 | exe + 27 DLL + 4 `.pri` + 86 语言目录 + `Microsoft.UI.Xaml/`（staging 约 62 MB，装包 16 MB） | 随包发布 |
-| 框架依赖 | `cargo build --features framework-dependent` | exe + `Microsoft.WindowsAppRuntime.Bootstrap.dll` + `resources.pri` | 系统上已安装的 WindowsAppRuntime 包；缺失时 bootstrapper 弹官方快速安装界面 |
+| 框架依赖 | `cargo build --features framework-dependent` | exe + `Microsoft.WindowsAppRuntime.Bootstrap.dll` + `resources.pri`（装包 4 MB） | 系统上已安装的 WindowsAppRuntime 包；缺失时 bootstrapper 弹官方快速安装界面 |
+
+**两个包都作为 Release 资源发布**（`AudioRouter-Setup-<ver>-x64.exe` 自包含、
+`AudioRouter-Setup-<ver>-x64-fd.exe` 框架依赖），用户自己选。二者 **AppId 相同、
+互斥覆盖**：装了一个再装另一个会替换掉前者，不会并存。
 
 - 模式由 cargo feature `winui3_gui/framework-dependent` 决定：
   `winui3_gui/build.rs` 读 `CARGO_FEATURE_FRAMEWORK_DEPENDENT` 切换
@@ -384,6 +388,8 @@ Refactor pass complete. Key changes:
 - **build script 里读 feature 要用 `CARGO_FEATURE_*` 环境变量**：
   `#[cfg(feature = "...")]` 在 `build.rs` 里不生效（build script 是独立的
   crate，拿不到本包的 feature）。
+- **自包含包与框架依赖包共用同一个 AppId**：两者互斥覆盖，不会并存。
+  发布时两个都上传，用户自己选装哪个。
 - **`#[implement]` macro wrapper name** (windows 0.62+): the macro
   generates a `<OriginalName>_Impl` newtype. Manual `impl <Trait>_Impl`
   blocks must target the wrapper, **not** the original name. See
@@ -574,12 +580,13 @@ pushing a `v*` tag and uploads an Inno Setup installer to a GitHub Release.
 4. `git tag v<version> && git push origin v<version>` → the release workflow
    builds `cargo build --locked --release`, so `Cargo.lock` must be
    committed and consistent with the manifests.
-   发布产物是**自包含**安装包：workflow 先编两个二进制，再由
-   `scripts/build-installer.ps1` 自己下载并校验 WindowsAppRuntime 运行时
+   发布产物是**两个安装包**：自包含（`AudioRouter-Setup-<ver>-x64.exe`）与
+   框架依赖（`AudioRouter-Setup-<ver>-x64-fd.exe`）。workflow 先编两个二进制，
+   再由 `scripts/build-installer.ps1` 自己下载并校验 WindowsAppRuntime 运行时
    （nupkg 有 actions/cache），最后用 Inno Setup 打包。运行时缺任何一个
    文件都会让打包步骤失败，不会再发出"只有 exe"的坏包。
-   workflow 还会额外构建一遍框架依赖变体并作为 artifact 上传（不进
-   Release 资源），保证这条路径在 CI 里持续被验证。
+   签名步骤排在两个包都生成之后（早于它的话框架依赖包会被漏签）。
+   自包含包缺失 = 发布失败；框架依赖包缺失只告警，不阻断发布。
 5. tag 推送触发的发布失败时，不必删 tag 重来：修好 workflow 后用
    `gh workflow run release-windows.yml -f tag=v<version>` 手动重跑即可。
    手动触发用的是 **main 分支上的 workflow 文件**，但构建内容仍然取自

@@ -221,23 +221,12 @@ jobs:
           # 退出，不会再产出"只装了一个 exe"的坏包。
           & .\scripts\build-installer.ps1 -NoBuild -Version $env:RELEASE_VERSION -DeploymentMode self-contained
 
-      - name: Sign installer (only if cert provided)
-        if: ${{ env.WINDOWS_SIGN_CERT && env.WINDOWS_SIGN_PASSWORD }}
-        shell: pwsh
-        run: |
-          $installer = Get-ChildItem ".\installer\Output\AudioRouter-Setup-*.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if (-not $installer) {
-            Write-Error "Installer not found"
-            exit 1
-          }
-          Write-Host "Signing installer: $($installer.FullName)"
-          & $env:SIGNTOOL_PATH sign /v /fd SHA256 /a /tr http://timestamp.digicert.com /td SHA256 $installer.FullName
-
       # 框架依赖变体：WinUI 改为引用系统上已安装的 WindowsAppRuntime 包，
       # 安装包只有几 MB；没装运行时的机器首次启动会弹官方快速安装界面。
-      # 这里只做构建校验并作为 artifact 上传，不进 Release 资源。
-      - name: Build framework-dependent variant (verification)
-        # 只是额外产物：失败不该卡住正式发布（自包含包已经打好）
+      # 这个包和自包含包一起作为 Release 资源发布，用户自己选。
+      - name: Build framework-dependent variant
+        # 非阻塞：框架依赖包是"另一个选择"，它挂了不该让自包含包也发不出去。
+        # 缺失时 Verify installer 步骤会明确报出来。
         continue-on-error: true
         shell: pwsh
         env:
@@ -253,12 +242,41 @@ jobs:
         run: |
           cargo build --locked --release --package winui3_gui --features winui3_gui/framework-dependent
           cargo build --locked --release --package audiorouter_service
+          # 框架依赖变体的 exe 同样要签名
+          if ($env:WINDOWS_SIGN_CERT -and $env:SIGNTOOL_PATH) {
+            foreach ($e in @("target/fd/release/winui3_gui.exe", "target/fd/release/audiorouter_service.exe")) {
+              if (Test-Path $e) {
+                Write-Host "Signing $e"
+                & $env:SIGNTOOL_PATH sign /v /fd SHA256 /a /tr http://timestamp.digicert.com /td SHA256 $e
+              }
+            }
+          }
 
-      - name: Build framework-dependent installer (verification)
+      - name: Build framework-dependent installer
         continue-on-error: true
         shell: pwsh
         run: |
           & .\scripts\build-installer.ps1 -NoBuild -Version $env:RELEASE_VERSION -DeploymentMode framework-dependent -CargoTargetDir "target/fd"
+
+      # 签名放在两个安装包都生成之后：
+      # - 两个包都要签，不能按"最新修改"挑 —— 那样只会签到框架依赖包
+      # - 放这里还能保证框架依赖包不会被漏签
+      - name: Sign installers (only if cert provided)
+        if: ${{ env.WINDOWS_SIGN_CERT && env.WINDOWS_SIGN_PASSWORD }}
+        shell: pwsh
+        run: |
+          $installers = @(
+            ".\installer\Output\AudioRouter-Setup-$env:RELEASE_VERSION-x64.exe",
+            ".\installer\Output\AudioRouter-Setup-$env:RELEASE_VERSION-x64-fd.exe"
+          )
+          foreach ($i in $installers) {
+            if (Test-Path $i) {
+              Write-Host "Signing installer: $i"
+              & $env:SIGNTOOL_PATH sign /v /fd SHA256 /a /tr http://timestamp.digicert.com /td SHA256 $i
+            } else {
+              Write-Host "跳过（不存在）: $i"
+            }
+          }
 
       - name: Upload framework-dependent installer artifact
         uses: actions/upload-artifact@v4
@@ -278,21 +296,32 @@ jobs:
           path: |
             target/release/winui3_gui.exe
             target/release/audiorouter_service.exe
+            target/fd/release/winui3_gui.exe
+            target/fd/release/audiorouter_service.exe
             installer/Output/
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Verify installer
+      - name: Verify installers
         shell: pwsh
         run: |
-          $installer = Get-Item ".\installer\Output\AudioRouter-Setup-$($env:RELEASE_VERSION)-x64.exe"
-          if (-not $installer) {
-            Write-Error "Installer not found!"
+          # 自包含包是硬性要求：它就是"给所有人"的那个
+          $sc = Get-Item ".\installer\Output\AudioRouter-Setup-$($env:RELEASE_VERSION)-x64.exe"
+          if (-not $sc) {
+            Write-Error "Self-contained installer not found!"
             exit 1
           }
-          $sizeMB = [math]::Round($installer.Length / 1MB, 2)
-          Write-Host "Installer: $($installer.Name)"
-          Write-Host "Size: $sizeMB MB"
+          # 框架依赖包是可选的另一个选择：缺失只告警，不阻断发布
+          $fd = Get-Item ".\installer\Output\AudioRouter-Setup-$($env:RELEASE_VERSION)-x64-fd.exe" -ErrorAction SilentlyContinue
+          if (-not $fd) {
+            Write-Warning "框架依赖安装包缺失，本次 Release 只会有自包含包。"
+          }
+          $scMB = [math]::Round($sc.Length / 1MB, 2)
+          $fdMB = if ($fd) { [math]::Round($fd.Length / 1MB, 2) } else { 0 }
+          $fdName = if ($fd) { $fd.Name } else { '未生成' }
+          $fdSize = if ($fd) { "$fdMB MB" } else { '-' }
+          Write-Host "Self-contained : $($sc.Name)  $scMB MB"
+          if ($fd) { Write-Host "Framework-dep  : $($fd.Name)  $fdMB MB" }
 
           # 写入构建摘要，GitHub Release/Actions 页面会展示
           $summary = @"
@@ -301,9 +330,9 @@ jobs:
           | Item | Value |
           |------|-------|
           | Version | ``$env:RELEASE_VERSION`` |
-          | Installer | ``$($installer.Name)`` |
-          | Size | $sizeMB MB |
-          | Signed | $(if ($env:WINDOWS_SIGN_CERT) { 'Yes' } else { 'No' }) |
+          | Self-contained installer | ``$($sc.Name)`` ($scMB MB) |
+          | Framework-dependent installer | ``$fdName`` ($fdSize) |
+          | Signed | $(if ($env.WINDOWS_SIGN_CERT) { 'Yes' } else { 'No' }) |
           "@
           $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
@@ -317,6 +346,9 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           files: |
             installer/Output/AudioRouter-Setup-${{ env.RELEASE_VERSION }}-x64.exe
-          fail_on_unmatched_files: true
+            installer/Output/AudioRouter-Setup-${{ env.RELEASE_VERSION }}-x64-fd.exe
+          # 自包含包由上面的 Verify installers 步骤硬性把关；
+          # 框架依赖包是可选的另一个选择，缺失时不阻断发布。
+          fail_on_unmatched_files: false
           generate_release_notes: true
           name: AudioRouter ${{ env.RELEASE_TAG }}

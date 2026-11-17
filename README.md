@@ -97,10 +97,15 @@ windows-reactor-setup 的 pin 一致），可用 `-RuntimeVersion <版本>` 临�
 
 ### 两种部署模式
 
-| 模式 | 安装包 | 目标电脑要求 |
-|---|---|---|
-| 自包含（默认） | 约 16 MB，含整套运行时 | 无需安装 Windows App Runtime |
-| 框架依赖 | 约 4 MB，只含 bootstrapper | 需已安装 Windows App Runtime；没有的话首次启动会弹官方快速安装界面 |
+Release 里会提供**两个安装包**，按需选一个：
+
+| 模式 | 文件名 | 大小 | 目标电脑要求 |
+|---|---|---|---|
+| 自包含（默认） | `AudioRouter-Setup-<版本>-x64.exe` | 约 16 MB，含整套运行时 | 无需安装 Windows App Runtime |
+| 框架依赖 | `AudioRouter-Setup-<版本>-x64-fd.exe` | 约 4 MB，只含 bootstrapper | 需已安装 Windows App Runtime；没有的话首次启动会弹官方快速安装界面 |
+
+已装 Windows App Runtime 的机器用框架依赖包更省事；没装过的用自包含包，
+开箱即用。**两者共用同一个 AppId，互斥覆盖**，装了一个再装另一个会替换前者。
 
 构建框架依赖变体：
 
