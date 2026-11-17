@@ -4,8 +4,6 @@
 mod en;
 mod zh;
 
-use std::collections::HashMap;
-
 /// 英文 locale 代码
 pub const LOCALE_EN: &str = "en";
 
@@ -51,32 +49,41 @@ pub fn detect_system_locale() -> &'static str {
 }
 
 /// 多语言管理器
+///
+/// 词表直接引用编译期的静态切片，不在堆上建 HashMap：
+///
+/// - 省掉一份常驻的哈希表分配；
+/// - I18n 的 clone 从「复制整张表」变成「复制几个指针」。
+///
+/// 界面每帧都要 clone 一次 I18n，整表复制的开销和堆压力都不小。
+/// 词表只有一百来条，线性查找完全够快。
 #[derive(Clone)]
 pub struct I18n {
     locale: String,
-    strings: HashMap<&'static str, &'static str>,
+    strings: &'static [(&'static str, &'static str)],
 }
 
 impl I18n {
     /// 根据 locale 代码创建翻译器
     pub fn new(locale: &str) -> Self {
-        let strings = match locale {
-            LOCALE_ZH => zh::ZH_MAP.iter().copied().collect(),
-            _ => en::EN_MAP.iter().copied().collect(),
-        };
         Self {
             locale: locale.to_string(),
-            strings,
+            strings: Self::table_for(locale),
         }
     }
 
     /// 切换语言
     pub fn set_locale(&mut self, locale: &str) {
-        self.strings = match locale {
-            LOCALE_ZH => zh::ZH_MAP.iter().copied().collect(),
-            _ => en::EN_MAP.iter().copied().collect(),
-        };
+        self.strings = Self::table_for(locale);
         self.locale = locale.to_string();
+    }
+
+    /// 取指定 locale 对应的静态词表
+    fn table_for(locale: &str) -> &'static [(&'static str, &'static str)] {
+        match locale {
+            LOCALE_ZH => zh::ZH_MAP,
+            _ => en::EN_MAP,
+        }
     }
 
     /// 获取当前 locale 代码
@@ -86,7 +93,11 @@ impl I18n {
 
     /// 翻译 key，找不到时返回 key 本身
     pub fn t<'a>(&'a self, key: &'a str) -> &'a str {
-        self.strings.get(key).copied().unwrap_or(key)
+        self.strings
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| *v)
+            .unwrap_or(key)
     }
 }
 

@@ -81,7 +81,7 @@ where
     let mut current_init = init_res;
 
     loop {
-        let loop_result = event_loop(&current_init, &current_mix, &cb, &stop_rx);
+        let loop_result = event_loop(&mut current_init, &current_mix, cb.as_ref(), &stop_rx);
 
         // 无论 event_loop 返回 Ok 还是 Err，都要 finalize 当前资源
         let _ = finalize_router(&current_setup);
@@ -202,9 +202,9 @@ fn setup_and_initialize(
 }
 
 fn event_loop<F>(
-    init_res: &RouterInitialized,
+    init_res: &mut RouterInitialized,
     mix_format: &MixFormat,
-    cb: &Arc<F>,
+    cb: &F,
     stop_rx: &mpsc::Receiver<()>,
 ) -> Result<()>
 where
@@ -217,7 +217,7 @@ where
                 // 持续处理所有可用的音频包，直到没有数据为止。
                 // 这样可以及时处理音频，避免缓冲积累和抖动。
                 loop {
-                    let processed = process_next_packet(init_res, mix_format, cb.clone())?;
+                    let processed = process_next_packet(init_res, mix_format, cb)?;
                     if !processed {
                         break;
                     }

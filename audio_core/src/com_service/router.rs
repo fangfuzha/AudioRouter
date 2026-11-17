@@ -1,7 +1,6 @@
 use crate::com_service::device::get_output_device_by_id_internal;
 use crate::router::{ChannelMode, RouterConfig};
 use anyhow::{Result, anyhow};
-use std::sync::Arc;
 use windows::Win32::Media::Audio::{
     AUDCLNT_BUFFERFLAGS_SILENT, IAudioCaptureClient, IAudioClient, IAudioRenderClient, IMMDevice,
     WAVEFORMATEX,
@@ -53,6 +52,12 @@ pub struct RouterOutputClient {
 pub struct RouterInitialized {
     pub capture_service: IAudioCaptureClient,
     pub render_services: Vec<RouterRenderClient>,
+    /// 复用的 f32 暂存缓冲区。
+    ///
+    /// 采集到的 PCM 每个包都要转成 f32 再交给回调。热路径上每次新建
+    /// `Vec` 会让分配器不停申请/释放十几 KB 的块，长时间运行容易把堆
+    /// 碎片化、抬高工作集。这里保留一块缓冲反复使用。
+    pub scratch: Vec<f32>,
 }
 
 #[derive(Clone)]
@@ -60,6 +65,10 @@ pub struct RouterRenderClient {
     pub channel_mode: ChannelMode,
     pub client: IAudioClient,
     pub service: IAudioRenderClient,
+    /// 渲染端缓冲区大小（帧数）。
+    ///
+    /// 客户端初始化之后这个值就不再变化，没必要每个包都问一次引擎。
+    pub buffer_size: u32,
 }
 
 pub struct MixFormat {
@@ -152,13 +161,12 @@ fn initialize_capture_client_internal(
 ) -> Result<IAudioCaptureClient> {
     use windows::Win32::Media::Audio::{AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK};
 
-    let buffer_duration_100ns: i64 = 50_000_000; // 50ms
     unsafe {
         client
             .Initialize(
                 windows::Win32::Media::Audio::AUDCLNT_SHAREMODE(AUDCLNT_SHAREMODE_SHARED.0),
                 AUDCLNT_STREAMFLAGS_LOOPBACK,
-                buffer_duration_100ns,
+                CAPTURE_BUFFER_DURATION_100NS,
                 0,
                 pwf,
                 None,
@@ -179,23 +187,49 @@ fn initialize_capture_client_internal(
     }
 }
 
+/// 渲染端缓冲区时长（100ns 单位）：50ms。
+///
+/// 引擎为每个渲染客户端按这个时长预留代理缓冲。太短会在调度抖动时欠载
+/// （爆音），太长则整体延迟变高。50ms 是延迟与稳定性的折中。
+///
+/// 注意单位：WASAPI 的 hnsBufferDuration 是 100ns 为单位，
+/// 1 秒 = 10_000_000。写大 100 倍就是 5 秒，引擎会真的按 5 秒分配
+/// 缓冲——每个客户端白白占掉约 2 MB，路由延迟也会跟着涨好几秒。
+const RENDER_BUFFER_DURATION_100NS: i64 = 500_000;
+
+/// 采集端缓冲区时长（100ns 单位）：50ms。
+///
+/// 单位同上：500_000 × 100ns = 50ms。
+const CAPTURE_BUFFER_DURATION_100NS: i64 = 500_000;
+
 /// Initialize a render client. Must be called in COM thread.
+///
+/// `allow_convert` 为 false 时不请求引擎做格式转换，客户端格式必须与
+/// 设备的原生混音格式完全一致。此时引擎走直通路径，采样率/位深转换器
+/// 完全不会被建立——单个转换器要占几 MB 常驻内存，是渲染端内存开销的
+/// 主要来源。
 fn initialize_render_client_internal(
     client: &IAudioClient,
     pwf: *const WAVEFORMATEX,
-) -> Result<IAudioRenderClient> {
+    allow_convert: bool,
+) -> Result<(IAudioRenderClient, u32)> {
     use windows::Win32::Media::Audio::{
         AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
         AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
     };
 
-    let buffer_duration_100ns: i64 = 50_000_000; // 50ms
+    let flags: u32 = if allow_convert {
+        AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
+    } else {
+        0
+    };
+
     unsafe {
         client
             .Initialize(
                 windows::Win32::Media::Audio::AUDCLNT_SHAREMODE(AUDCLNT_SHAREMODE_SHARED.0),
-                AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-                buffer_duration_100ns,
+                flags,
+                RENDER_BUFFER_DURATION_100NS,
                 0,
                 pwf,
                 None,
@@ -209,11 +243,70 @@ fn initialize_render_client_internal(
             )
         })?;
 
+        // 缓冲区大小在客户端生命周期内不变，取一次就够。
+        let buffer_size = client.GetBufferSize().unwrap_or(0);
+
         client
             .Start()
             .map_err(|e| anyhow!("IAudioClient::Start (render) failed: {}", err_code(&e)))?;
 
-        Ok(service)
+        Ok((service, buffer_size))
+    }
+}
+
+/// 判断设备的原生混音格式是否与 `pwf` 等价。
+///
+/// `GetMixFormat` 返回的内存由本函数释放。
+fn device_matches_mix_format(client: &IAudioClient, pwf: *const WAVEFORMATEX) -> bool {
+    let device_pwf = match unsafe { client.GetMixFormat() } {
+        Ok(p) if !p.is_null() => p,
+        _ => return false,
+    };
+    let same = formats_equivalent(device_pwf, pwf);
+    unsafe {
+        CoTaskMemFree(Some(device_pwf.cast()));
+    }
+    same
+}
+
+/// 比较两个 WAVEFORMATEX 在音频引擎看来是否等价。
+///
+/// 采样率、声道数、位深、块对齐一致，并且（EXTENSIBLE 时）子格式与
+/// 声道掩码一致，就算等价——引擎可以直接搬运数据，不必建立转换器。
+fn formats_equivalent(a: *const WAVEFORMATEX, b: *const WAVEFORMATEX) -> bool {
+    if a.is_null() || b.is_null() {
+        return false;
+    }
+
+    unsafe {
+        let a_tag = (*a).wFormatTag;
+        let b_tag = (*b).wFormatTag;
+        if a_tag != b_tag
+            || (*a).nChannels != (*b).nChannels
+            || (*a).nSamplesPerSec != (*b).nSamplesPerSec
+            || (*a).wBitsPerSample != (*b).wBitsPerSample
+            || (*a).nBlockAlign != (*b).nBlockAlign
+        {
+            return false;
+        }
+
+        const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
+        if a_tag == WAVE_FORMAT_EXTENSIBLE {
+            let ea = a as *const windows::Win32::Media::Audio::WAVEFORMATEXTENSIBLE;
+            let eb = b as *const windows::Win32::Media::Audio::WAVEFORMATEXTENSIBLE;
+            let mask_a = (*ea).dwChannelMask;
+            let mask_b = (*eb).dwChannelMask;
+            let sub_a = (*ea).SubFormat;
+            let sub_b = (*eb).SubFormat;
+            if mask_a != mask_b
+                || sub_a.data1 != sub_b.data1
+                || sub_a.data2 != sub_b.data2
+                || sub_a.data3 != sub_b.data3
+            {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -229,12 +322,40 @@ pub fn initialize_router(
 
     let mut render_services = Vec::new();
     for render_client in render_clients {
-        match initialize_render_client_internal(&render_client.client, pwf) {
-            Ok(service) => {
+        // 目标设备的原生混音格式与源一致时，走直通路径：不请求引擎做格式
+        // 转换，也就省掉了每个客户端几 MB 的采样率转换器。
+        let needs_convert = !device_matches_mix_format(&render_client.client, pwf);
+
+        let init = match initialize_render_client_internal(
+            &render_client.client,
+            pwf,
+            needs_convert,
+        ) {
+            Ok(v) => Ok(v),
+            Err(e) if needs_convert => Err(e),
+            Err(e) => {
+                // 直通路径被设备拒绝（少数设备只认自己的混音格式）时回退到
+                // 带转换的写法，保证功能正确；只是那种设备会多占几 MB。
+                // 设备失效（invalidated）则不能重试，要交给上层重启路由。
+                if e.to_string().to_lowercase().contains("invalidated") {
+                    Err(e)
+                } else {
+                    log::warn!(
+                        "Direct render init failed for {}, retrying with format conversion: {e}",
+                        render_client.device_id
+                    );
+                    initialize_render_client_internal(&render_client.client, pwf, true)
+                }
+            }
+        };
+
+        match init {
+            Ok((service, buffer_size)) => {
                 render_services.push(RouterRenderClient {
                     channel_mode: render_client.channel_mode,
                     client: render_client.client.clone(),
                     service,
+                    buffer_size,
                 });
             }
             Err(e) => log::warn!(
@@ -257,6 +378,7 @@ pub fn initialize_router(
     Ok(RouterInitialized {
         capture_service,
         render_services,
+        scratch: Vec::new(),
     })
 }
 
@@ -269,9 +391,9 @@ const TARGET_BUFFER_RATIO: f64 = 0.2;
 /// 这样可以避免波形断裂导致的噪点。
 /// 返回 Ok(true) 表示跳过本次写入，Ok(false) 表示正常写入。
 /// 返回 Err 表示设备 invalidated，调用方应传播错误触发重启。
-fn should_skip_write(render_client: &IAudioClient) -> Result<bool> {
+fn should_skip_write(render_client: &RouterRenderClient) -> Result<bool> {
     unsafe {
-        let padding = match render_client.GetCurrentPadding() {
+        let padding = match render_client.client.GetCurrentPadding() {
             Ok(p) => p,
             Err(e) => {
                 if is_device_invalidated(&e) {
@@ -284,18 +406,8 @@ fn should_skip_write(render_client: &IAudioClient) -> Result<bool> {
             }
         };
 
-        let buffer_size = match render_client.GetBufferSize() {
-            Ok(s) => s,
-            Err(e) => {
-                if is_device_invalidated(&e) {
-                    return Err(anyhow!(
-                        "Render device invalidated during GetBufferSize: {}",
-                        err_code(&e)
-                    ));
-                }
-                return Ok(false);
-            }
-        };
+        // 缓冲区大小在初始化时就缓存好了，这里不再问引擎。
+        let buffer_size = render_client.buffer_size;
 
         if buffer_size == 0 {
             return Ok(false);
@@ -308,9 +420,9 @@ fn should_skip_write(render_client: &IAudioClient) -> Result<bool> {
 
 /// Process a single audio packet. Must be called in COM environment.
 pub fn process_next_packet<F>(
-    state: &RouterInitialized,
+    state: &mut RouterInitialized,
     mix_format: &MixFormat,
-    cb: Arc<F>,
+    cb: &F,
 ) -> Result<bool>
 where
     F: Fn(&[f32], u32, u16) + Send + Sync + 'static,
@@ -374,7 +486,11 @@ where
             let channels_count = (*pwf).nChannels as usize;
             let sample_rate = (*pwf).nSamplesPerSec;
 
-            let mut out_f32 = Vec::with_capacity(frames as usize * channels_count);
+            // 复用缓冲区：清空后按需扩容。热路径上每次新建 Vec 会让
+            // 分配器不停申请/释放十几 KB 的块，长跑会把堆碎片化。
+            let out_f32 = &mut state.scratch;
+            out_f32.clear();
+            out_f32.reserve(frames as usize * channels_count);
 
             let w_format = (*pwf).wFormatTag;
             let sample_format = detect_sample_format(pwf);
@@ -420,7 +536,7 @@ where
             let channels = channels_count as u16;
 
             if !out_f32.is_empty() {
-                cb(&out_f32, sample_rate, channels);
+                cb(out_f32.as_slice(), sample_rate, channels);
             }
 
             for render in renders.iter() {
@@ -428,7 +544,7 @@ where
                 // 让输出端消化已缓冲数据。整个 packet 跳过可以避免
                 // 部分截断导致的波形断裂和噪点。
                 // should_skip_write 返回 Err 表示设备 invalidated，需传播错误触发重启。
-                if should_skip_write(&render.client)? {
+                if should_skip_write(render)? {
                     continue;
                 }
 

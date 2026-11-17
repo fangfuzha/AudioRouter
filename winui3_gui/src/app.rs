@@ -191,18 +191,23 @@ impl Component for RootComponent {
         // 托盘常驻时主界面看不到，状态必须同步到托盘（状态行 / 启停可用性 /
         // tooltip）。只在状态变化时写一次，避免每帧都动托盘菜单。
         {
-            let (running, count, i18n) = {
+            // 托盘状态没变就完全不碰词表。界面每帧都会走到这里，
+            // 克隆只放在「状态真的变了」的分支里。
+            let (running, count, changed) = {
                 let c = self.controller.lock();
-                (c.is_running, c.enabled_output_ids().len(), c.i18n.clone())
-            };
-            let changed = {
-                let mut cache = self.tray_status.lock();
-                let changed = cache.map(|c| c != (running, count)).unwrap_or(true);
-                *cache = Some((running, count));
-                changed
+                let running = c.is_running;
+                let count = c.enabled_output_count();
+                let changed = {
+                    let mut cache = self.tray_status.lock();
+                    let changed = cache.map(|c| c != (running, count)).unwrap_or(true);
+                    *cache = Some((running, count));
+                    changed
+                };
+                (running, count, changed)
             };
             if changed {
-                crate::tray::update_tray_status(&i18n, running, count);
+                let c = self.controller.lock();
+                crate::tray::update_tray_status(&c.i18n, running, count);
             }
         }
 
@@ -577,15 +582,22 @@ fn home_page(
     make_setter: impl Fn() + Clone + Send + 'static,
 ) -> Element {
     let c = controller.lock();
-    let source_devices: Vec<_> = c.devices.to_vec();
-    let output_devices: Vec<_> = c.filtered_target_devices().into_iter().cloned().collect();
+    // 设备数据只克隆一次。原来这里克隆了两遍整份设备列表（源设备一份、
+    // 目标设备一份），每帧都要把每个设备的多个 String 复制一遍。
+    let all_devices: Vec<_> = c.devices.clone();
     let is_running = c.is_running;
     let status_text = c.status_text.clone();
     let status_level = c.status_level;
     let selected_source_id = c.selected_source.clone();
     let start_block = c.start_block();
-    let enabled_output_count = c.enabled_output_ids().len();
+    let enabled_output_count = c.enabled_output_count();
     drop(c);
+
+    // 输出设备行（排除源设备本身）。这里借用 all_devices，不再逐个深拷贝。
+    let output_devices: Vec<_> = all_devices
+        .iter()
+        .filter(|d| Some(d.id.as_str()) != selected_source_id.as_deref())
+        .collect();
 
     let channel_mode_items: Vec<String> = vec![
         i18n.t("channelModes.Stereo").to_string(),
@@ -610,11 +622,14 @@ fn home_page(
     ];
 
     // 源设备下拉列表
-    let source_device_names: Vec<String> = source_devices
+    let source_device_names: Vec<String> = all_devices
         .iter()
         .map(|d| d.friendly_name.clone())
         .collect();
-    let selected_source_index = source_devices
+    // 下拉框的选择回调是 'static 的，必须自己持有一份数据；
+    // 但它只需要设备 id，没必要把整条 DeviceInfo 再克隆一遍。
+    let source_device_ids: Vec<String> = all_devices.iter().map(|d| d.id.clone()).collect();
+    let selected_source_index = all_devices
         .iter()
         .position(|d| Some(&d.id) == selected_source_id.as_ref())
         .map(|i| i as i32)
@@ -623,38 +638,45 @@ fn home_page(
     let source_combo = {
         let controller_clone = Arc::clone(&controller);
         let refresh = make_setter.clone();
-        let devices = source_devices.clone();
+        let device_ids = source_device_ids;
         ComboBox::new(source_device_names)
             .selected_index(selected_source_index)
             // 未选择源设备时显示占位提示，而不是一个空白下拉框。
             .placeholder_text(i18n.t("SourcePlaceholder"))
             .on_selection_changed(move |index| {
-                if let Some(device) = devices.get(index as usize) {
+                if let Some(device_id) = device_ids.get(index as usize) {
                     let mut c = controller_clone.lock();
-                    c.select_source_device(device.id.clone());
+                    c.select_source_device(device_id.clone());
                     refresh();
                 }
             })
     };
 
-    let output_items: Vec<Element> = output_devices
-        .into_iter()
-        .map(|device| {
-            let device_id = device.id.clone();
-
-            let (enabled, selected_mode_index) = {
-                let c = controller.lock();
-                let handle = c.config_manager.handle();
-                let cfg = handle.read();
-                let output = cfg.outputs.iter().find(|o| o.device_id == device_id);
+    // 每行的勾选状态与声道模式都来自配置：整张表读一次就够，
+    // 原来每一行都要重新加锁 + 读一遍配置。
+    let output_states: Vec<(bool, i32)> = {
+        let c = controller.lock();
+        let handle = c.config_manager.handle();
+        let cfg = handle.read();
+        output_devices
+            .iter()
+            .map(|device| {
+                let output = cfg.outputs.iter().find(|o| o.device_id == device.id);
                 let enabled = output.map(|o| o.enabled).unwrap_or(false);
                 let mode = output
                     .and_then(|o| o.channel_mode.as_deref())
                     .map(|s| ChannelMode::from_config(Some(s)))
                     .unwrap_or(ChannelMode::Stereo);
-                let index = mode as i32;
-                (enabled, index)
-            };
+                (enabled, mode as i32)
+            })
+            .collect()
+    };
+
+    let output_items: Vec<Element> = output_devices
+        .into_iter()
+        .zip(output_states)
+        .map(|(device, (enabled, selected_mode_index))| {
+            let device_id = device.id.clone();
 
             // 当前选中模式对应的处理逻辑说明,用作 ComboBox 悬浮提示。
             // 渲染时由 make_setter 触发刷新,选择变更后 tooltip 会随重渲染更新。

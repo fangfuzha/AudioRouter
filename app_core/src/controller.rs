@@ -181,7 +181,7 @@ impl AppController {
             Some(id) if !id.is_empty() => {}
             _ => return Some(StartBlock::NoSource),
         }
-        if self.enabled_output_ids().is_empty() {
+        if self.enabled_output_count() == 0 {
             return Some(StartBlock::NoOutput);
         }
         None
@@ -189,7 +189,8 @@ impl AppController {
 
     /// 当前已勾选（且仍然存在、不是源设备）的输出设备 id。
     pub fn enabled_output_ids(&self) -> Vec<String> {
-        let cfg = self.config_manager.handle().read().clone();
+        let handle = self.config_manager.handle();
+        let cfg = handle.read();
         let source_id = self.selected_source.as_deref().unwrap_or_default();
         self.devices
             .iter()
@@ -197,6 +198,21 @@ impl AppController {
             .filter(|d| cfg.outputs.iter().any(|o| o.device_id == d.id && o.enabled))
             .map(|d| d.id.clone())
             .collect()
+    }
+
+    /// 已勾选（且仍然存在、不是源设备）的输出设备数量。
+    ///
+    /// 渲染路径只需要「有几个」，不需要 id 列表。这里不做任何堆分配，
+    /// 也不深拷贝整份配置——界面每帧都会调用。
+    pub fn enabled_output_count(&self) -> usize {
+        let handle = self.config_manager.handle();
+        let cfg = handle.read();
+        let source_id = self.selected_source.as_deref().unwrap_or_default();
+        self.devices
+            .iter()
+            .filter(|d| d.id != source_id)
+            .filter(|d| cfg.outputs.iter().any(|o| o.device_id == d.id && o.enabled))
+            .count()
     }
 
     /// 一次性勾选/取消勾选所有输出设备。
@@ -408,12 +424,14 @@ impl AppController {
 
     pub fn save_routing_config(&mut self) {
         let source_id = self.selected_source.clone().unwrap_or_default();
+        // 配置只读一次：原来在 map 闭包里每个设备都克隆一份整份配置。
+        let handle = self.config_manager.handle();
+        let cfg = handle.read();
         let outputs: Vec<Output> = self
             .devices
             .iter()
             .filter(|d| d.id != source_id)
             .map(|d| {
-                let cfg = self.config_manager.handle().read().clone();
                 let existing = cfg.outputs.iter().find(|o| o.device_id == d.id);
                 Output {
                     device_id: d.id.clone(),
@@ -422,6 +440,7 @@ impl AppController {
                 }
             })
             .collect();
+        drop(cfg);
 
         if let Err(e) = self.config_manager.update(|cfg| {
             cfg.source_device_id = source_id;
@@ -449,7 +468,8 @@ impl AppController {
             }
         };
 
-        let cfg = self.config_manager.handle().read().clone();
+        let handle = self.config_manager.handle();
+        let cfg = handle.read();
         let targets: Vec<RouterTarget> = self
             .devices
             .iter()

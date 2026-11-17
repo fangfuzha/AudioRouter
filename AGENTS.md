@@ -45,6 +45,37 @@ client and writes to N render clients on a 3ms timer; see
 
 For end-user docs see `README.md`; for short-term todos see `TODO.md`.
 
+## Current Status (2026-11-18，内存占用优化)
+
+v0.3.16 修掉了音频客户端的一处单位换算 bug，并削减了界面渲染路径上的重复分配。
+
+- **WASAPI 缓冲时长的单位是 100ns，原来写成了 5 秒。**
+  `hnsBufferDuration` 的单位是 100ns（1 秒 = 10,000,000），代码里写的
+  `50_000_000` 注释成「50ms」，实际是 **5 秒**。引擎照此分配代理缓冲，
+  每个音频客户端多占约 **1.9 MB** 私有内存，路由延迟也跟着涨好几秒。
+  采集端与渲染端都改成 `500_000`（50ms）。
+- **共享模式下不再无谓请求格式转换。** 目标设备的原生混音格式与源一致时
+  （Windows 上通常是统一的 48kHz/32bit/2ch），只传格式、不开
+  `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`，引擎走直通路径，不再为每个客户端
+  建立采样率/位深转换器；设备拒绝直通时自动回退。
+- **热路径不再反复分配。** f32 暂存缓冲区复用；`GetBufferSize()` 改为
+  初始化时缓存一次；回调改传 `&F`，去掉每包的 `Arc` 克隆。
+- **界面渲染路径的重复拷贝收敛。** `I18n` 词表由 `HashMap` 改为静态切片
+  （省掉常驻哈希表，clone 只剩几个指针）；渲染不再深拷贝整份 `Config`；
+  设备列表每帧克隆次数 3 → 1；输出行的配置读取提到循环外。
+- **设备热插拔事件加 300ms 尾随去抖**，避免属性变化引发的全量枚举 + 全量重绘。
+
+实测（release 构建，同一台机器）：
+
+| 场景 | 改前 工作集 | 改后 工作集 |
+|---|---|---|
+| 空闲（不路由） | 123.1 MB | 123.3 MB |
+| 路由 → 1 个输出 | 131.4 MB | 124.3 MB |
+| 路由 → 3 个输出 | 139.2 MB | 124.1 MB |
+
+每个音频客户端的私有内存从 1.84 MB 降到 0.02 MB，输出设备数量对内存几乎
+不再有影响。空闲的 ~123 MB 是 Windows App SDK + D3D 合成器的固有开销。
+
 ## Current Status (2026-11-18)
 
 Four UI complaints fixed in one pass:
@@ -342,6 +373,24 @@ Refactor pass complete. Key changes:
   的 `git fetch` refspec 就是这么写的。
 - **CLI builds must be on Windows** — `windows-sys` and `windows`
   are pulled unconditionally; cross-compilation is not configured.
+- **WASAPI 的 `hnsBufferDuration` 单位是 100ns，不是毫秒。** 1 秒 =
+  10,000_000。采集端和渲染端都写 `500_000`（= 50ms）。写成
+  `50_000_000` 会让引擎按 **5 秒** 分配代理缓冲：每个音频客户端白白占
+  约 1.9 MB 私有内存，路由延迟也跟着涨好几秒。引擎回报的
+  `GetBufferSize()`（帧数）可以直接验证——50ms × 48kHz = 2400 帧，
+  写错时是 240000 帧。
+- **共享模式下别无脑开 `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`。** 开着会让
+  引擎为每个渲染客户端建立采样率/位深转换器（额外 CPU 与延迟）。
+  Windows 的共享模式混音格式在同一台机器上通常是统一的
+  （48kHz / 32bit / 2ch EXTENSIBLE），此时只传格式、不传转换标志即可走
+  直通路径。比对逻辑在 `audio_core::com_service::router::formats_equivalent`；
+  直通被设备拒绝时会自动回退到带转换的写法（invalidated 不回退）。
+- **内存占用基线（2026-11 实测，release 构建，WinUI 3 自包含部署）。**
+  空闲态约 123 MB 工作集 / 105 MB 私有字节，其中绝大部分是 Windows App
+  SDK（`Microsoft.ui.xaml.dll` 14 MB + `Microsoft.UI.Xaml.Controls.dll`
+  6 MB）与 D3D 合成器，属于框架固有开销。**应用自己能控的部分是音频
+  客户端**：缓冲时长修好后，每个渲染客户端约 20 KB，路由整体只比空闲态
+  多约 1 MB，输出设备数量对内存几乎不再产生影响。
 
 ## Release Process
 

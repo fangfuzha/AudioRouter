@@ -12,7 +12,9 @@
 //! 避免跨线程操作 Win32 窗口。
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
+use std::time::Duration;
 
 use app_core::controller::AppController;
 use audio_core::device_watcher::DeviceWatcher;
@@ -93,7 +95,24 @@ fn spawn_device_watcher(
     *watcher_slot.lock() = Some(watcher);
 
     std::thread::spawn(move || {
+        // 设备事件可能密集到来：音量变化、属性写入都会触发
+        // OnPropertyValueChanged。逐个响应会把设备列表反复枚举、反复重绘，
+        // 既费 CPU 又制造大量临时分配（每次枚举都要新建 COM 对象和字符串）。
+        //
+        // 这里做一次尾随去抖：收到事件后等一小段时间，期间再有事件只
+        // 刷新计时器；安静下来之后才真正枚举一次设备。
+        const DEBOUNCE: Duration = Duration::from_millis(300);
+
         while rx.recv().is_ok() {
+            loop {
+                match rx.recv_timeout(DEBOUNCE) {
+                    // 安静了 DEBOUNCE 这么久，可以处理了
+                    Err(RecvTimeoutError::Timeout) => break,
+                    Err(RecvTimeoutError::Disconnected) => return,
+                    // 又来一个事件，继续等
+                    Ok(_) => continue,
+                }
+            }
             {
                 let mut c = controller.lock();
                 c.refresh_devices();
