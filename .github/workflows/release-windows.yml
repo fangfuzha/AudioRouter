@@ -237,6 +237,8 @@ jobs:
       # 安装包只有几 MB；没装运行时的机器首次启动会弹官方快速安装界面。
       # 这里只做构建校验并作为 artifact 上传，不进 Release 资源。
       - name: Build framework-dependent variant (verification)
+        # 只是额外产物：失败不该卡住正式发布（自包含包已经打好）
+        continue-on-error: true
         shell: pwsh
         env:
           CARGO_PROFILE_RELEASE_LTO: thin
@@ -245,22 +247,26 @@ jobs:
           # 这是 build script 的副作用，sccache 命中时不会发生 —— 所以这里关掉 sccache，
           # 并用独立的 target 目录，避免覆盖自包含变体的产物。
           RUSTC_WRAPPER: ""
-          CARGO_TARGET_DIR: "target\fd"
+          # 注意：不要写成 "target\fd" —— YAML 双引号里 \f 是换页符(U+000C)，
+          # 环境变量会变成 "target^Ld"，cargo 直接报 os error 123。
+          CARGO_TARGET_DIR: target/fd
         run: |
           cargo build --locked --release --package winui3_gui --features winui3_gui/framework-dependent
           cargo build --locked --release --package audiorouter_service
 
       - name: Build framework-dependent installer (verification)
+        continue-on-error: true
         shell: pwsh
         run: |
-          & .\scripts\build-installer.ps1 -NoBuild -Version $env:RELEASE_VERSION -DeploymentMode framework-dependent -CargoTargetDir "target\fd"
+          & .\scripts\build-installer.ps1 -NoBuild -Version $env:RELEASE_VERSION -DeploymentMode framework-dependent -CargoTargetDir "target/fd"
 
       - name: Upload framework-dependent installer artifact
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: audiorouter-framework-dependent-installer
           path: installer/Output/AudioRouter-Setup-${{ env.RELEASE_VERSION }}-x64-fd.exe
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 7
 
       # 构建失败时上传日志和中间产物便于排查
