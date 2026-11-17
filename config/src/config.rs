@@ -155,6 +155,10 @@ impl Config {
 }
 
 /// Manager providing thread-safe access and persistence.
+///
+/// 可克隆：内部只有路径与一个 `Arc<RwLock<Config>>`，克隆出来的实例共享
+/// 同一份内存状态。UI 线程与路由线程各自持有一份，改动立刻互相可见。
+#[derive(Clone)]
 pub struct ConfigManager {
     path: PathBuf,
     inner: Arc<RwLock<Config>>,

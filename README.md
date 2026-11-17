@@ -12,10 +12,11 @@
 - 每个输出设备都可以单独「试听」，确认哪个是哪个音箱
 - 每个输出设备可单独选择声道模式（立体声 / 单声道 / 左右声道互换等）
 - 纯 Rust 实现，原生 Windows 应用，无 WebView/Node.js 依赖
-- 路由与托盘跑在**常驻服务进程**里，控制面板关闭后立即退出，WinUI 的上百 MB 内存全部还给系统
-- 系统托盘常驻（由服务进程承载），托盘菜单实时显示当前路由状态
+- **单 exe、多线程**：托盘跑在主线程，路由跑在服务线程，WinUI 3 控制面板跑在自己的 UI 线程
+- 控制面板**按需创建**：以「启动时最小化」方式开机时根本不加载 Windows App SDK，上百 MB 的框架开销不会白吃
+- 系统托盘常驻，托盘菜单实时显示当前路由状态，「显示 / 隐藏」是真切换
 - 可自定义全局热键（留空表示不注册），保存后立即生效；按下热键可随时唤出控制面板
-- `Ctrl+W` 与标题栏关闭按钮行为一致：关闭控制面板进程（托盘与路由仍在服务进程里继续运行）
+- `Ctrl+W` 与标题栏关闭按钮行为一致：把窗口隐藏到托盘，托盘、路由与全局热键继续运行
 - 记住窗口位置、大小与侧栏展开状态，下次启动自动恢复
 - 首次启动按系统 UI 语言自动选择中文/英文界面，之后可在设置中随时切换
 
@@ -25,22 +26,21 @@
 
 ```bash
 # 运行
-cargo run --package winui3_gui
+cargo run --package audiorouter
 
 # 构建发布
-cargo build --release --package winui3_gui
+cargo build --release --package audiorouter
 ```
 
-生成的 exe 位于 `target/release/winui3_gui.exe`。
+生成的 exe 位于 `target/release/AudioRouter.exe`。托盘、路由、控制面板全在它里面。
 
 ## 项目结构
 
 ```
 audio_core/        # 音频核心库（设备枚举、路由引擎）
 config/            # 配置管理（settings.toml）
-app_core/          # 应用核心逻辑（控制器、i18n、自动启动、IPC）
-audiorouter_service/  # 常驻服务：路由 + 托盘 + 全局热键（纯 Win32）
-winui3_gui/        # WinUI 3 控制面板
+app_core/          # 应用核心逻辑（控制器、i18n、自动启动、进程内命令总线）
+audiorouter/       # 唯一入口：托盘（主线程）+ 路由（服务线程）+ WinUI 3 控制面板（UI 线程）
 installer/         # Inno Setup 安装脚本 + 运行时文件清单
 scripts/           # 构建与打包脚本
 assets/            # 共享资源（图标等）
@@ -111,8 +111,7 @@ Release 里会提供**两个安装包**，按需选一个：
 
 ```powershell
 $env:CARGO_TARGET_DIR = "target\fd"
-cargo build --release -p winui3_gui --features winui3_gui/framework-dependent
-cargo build --release -p audiorouter_service
+cargo build --release -p audiorouter --features audiorouter/framework-dependent
 .\scripts\build-installer.ps1 -NoBuild -Version 1.0.0 -DeploymentMode framework-dependent -CargoTargetDir "target\fd"
 ```
 
@@ -131,37 +130,40 @@ cargo build --release -p audiorouter_service
 ## 架构
 
 ```
-                ┌──────────────────────┐
-                │     winui3_gui       │  WinUI 3 桌面 UI（windows-reactor）
-                │  (主入口 / 视图层)    │
-                └─────────┬────────────┘
-                          │ 借用 Arc<Mutex<AppController>>
-                ┌─────────▼────────────┐
-                │      app_core        │  业务逻辑、Controller、I18n、更新
-                │  (与 GUI 解耦)        │
-                └─────────┬────────────┘
-                          │ 持有 Router + ConfigManager
-        ┌─────────────────┼──────────────────┐
-        ▼                 ▼                  ▼
-  ┌──────────┐      ┌──────────┐       ┌──────────┐
-  │audio_core│      │  config  │       │ 系统 API │
-  │ WASAPI   │      │ settings │       │  注册表  │
-  │ 路由/枚举│      │  .toml   │       │  COM     │
-  └──────────┘      └──────────┘       └──────────┘
+   ┌──────────────────────────────────────────────────┐
+   │  audiorouter.exe（单进程 · 多线程）               │
+   ├──────────────────────────────────────────────────┤
+   │ 主线程   托盘图标 / 全局热键 / Win32 消息循环      │
+   │    │ 命令总线 (app_core::bus::Command)            │
+   │    ▼                                             │
+   │ 服务线程  路由启停 / 设备枚举 / 状态汇总           │
+   │    │                                             │
+   │ UI 线程    WinUI 3 控制面板（按需创建，STA）       │
+   │    │                                             │
+   │    ▼ 共享 Arc<Mutex<AppController>>               │
+   │ ┌────────────────────────┐  ┌──────────────────┐ │
+   │ │       app_core         │  │    audio_core    │ │
+   │ │ Controller / I18n /    │  │ WASAPI 路由引擎  │ │
+   │ │ 自动启动 / 命令总线    │  │ 设备枚举 / 热插拔 │ │
+   │ └───────────┬────────────┘  └──────────────────┘ │
+   │             ▼                                     │
+   │        ┌─────────┐                                │
+   │        │  config │  settings.toml（原子写入）     │
+   │        └─────────┘                                │
+   └──────────────────────────────────────────────────┘
 ```
 
 - **audio_core** — 纯音频库。`router` 负责 WASAPI loopback 捕获 + 多端渲染(共享模式,SRC 自动转换),支持设备 invalidated 自动重启 + 指数退避重试。`com_service::device` 提供设备枚举 / 热插拔通知(`DeviceWatcher`)。
-- **app_core** — Controller 把 GUI 调用翻译成 `Router.start / stop`,管理 `ConfigManager`,处理 i18n、自动启动、GitHub Release 更新检查与下载。
-- **config** — `settings.toml` 原子写入(临时文件 + rename),启动时 schema 校验(版本号 + outputs 唯一性)。
-- **winui3_gui** — WinUI 3 控制面板,windows-reactor 反应式组件。只负责界面,单例 / 代理热加载 / 更新检查等平台行为在这一层。
-- **audiorouter_service** — 常驻服务进程(纯 Win32,不加载 Windows App SDK)。音频路由 / 设备热插拔 / 系统托盘 / 全局热键都在这里,面板进程退出后它继续常驻。
+- **app_core** — Controller 把界面调用翻译成 `Router.start / stop`,管理 `ConfigManager`,处理 i18n、自动启动、GitHub Release 更新检查与下载。`bus` 是进程内命令总线,取代了旧的跨进程命名管道。
+- **config** — `settings.toml` 原子写入(临时文件 + rename),启动时 schema 校验(版本号 + outputs 唯一性)。UI 线程与服务线程共享同一个 `ConfigManager`。
+- **audiorouter** — 唯一入口。主线程跑托盘与热键,服务线程跑路由,UI 线程跑 WinUI 3 界面(windows-reactor 反应式组件)。单例 / 代理热加载 / 更新检查等平台行为在这一层。
 
 ## 开发工作流
 
 ```bash
 # 增量开发
-cargo run -p winui3_gui                  # debug 模式运行,日志输出到 stderr
-cargo build --release -p winui3_gui      # release 模式构建
+cargo run -p audiorouter                # debug 模式运行,日志输出到 stderr
+cargo build --release -p audiorouter    # release 模式构建
 
 # 静态检查(CI 也跑这三步)
 cargo fmt --check                        # 格式
@@ -174,10 +176,10 @@ cargo test --workspace --lib             # 单元测试
 
 ### 调试技巧
 
-- **release 模式日志**:`%LOCALAPPDATA%\AudioRouter\logs\winui3_gui.log`,超过 5 MiB 自动 rotate 到 `.old`。
+- **release 模式日志**:`%LOCALAPPDATA%\AudioRouter\logs\AudioRouter.log`,超过 5 MiB 自动 rotate 到 `.old`。
 - **dev 模式日志**:直接走 stderr(因为有控制台)。
 - **音频路由卡死**:log 里搜 `invalidated` / `Restart attempt`,通常意味着设备热插拔或格式切换,worker 会自动重试 10 次。
-- **GUI 单实例**:首次启动会创建 `Local\AudioRouter-SingleInstance-Mutex`,第二次启动会唤起已有窗口后退出。
+- **单实例**:首次启动会创建 `Local\AudioRouter-SingleInstance-Mutex`,第二次启动会通过托盘窗口类名找到常驻实例,让它把控制面板叫起来后自己退出。
 
 ### 平台差异
 

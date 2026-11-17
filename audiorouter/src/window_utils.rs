@@ -12,12 +12,12 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CallWindowProcW, DefWindowProcW, EnumWindows, FlashWindowEx,
     GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW, GetWindowPlacement, GetWindowTextW,
-    GetWindowThreadProcessId, IsWindow, IsWindowVisible, PostMessageW, SetWindowLongPtrW,
-    SetWindowPos, SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx, FLASHWINFO, FLASHW_ALL,
-    GWLP_WNDPROC, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE,
-    WH_KEYBOARD_LL, WINDOWPLACEMENT, WM_CLOSE, WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYUP, WM_NCDESTROY,
-    WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    GetWindowThreadProcessId, IsWindow, IsWindowVisible, PostMessageW, SetForegroundWindow,
+    SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx,
+    FLASHWINFO, FLASHW_ALL, GWLP_WNDPROC, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
+    SW_HIDE, SW_MAXIMIZE, SW_SHOW, WH_KEYBOARD_LL, WINDOWPLACEMENT, WM_APP, WM_CLOSE,
+    WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYUP, WM_NCDESTROY, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 /// `SC_KEYMENU`：Alt（或 F10）触发的系统菜单命令。
@@ -26,6 +26,20 @@ const SC_KEYMENU: usize = 0xF100;
 static CACHED_HWND: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 /// 主窗口句柄（钩好之后记住，避免每帧重新枚举窗口）。
 static MAIN_HOOKED_HWND: AtomicUsize = AtomicUsize::new(0);
+
+/// 自定义消息：显示主窗口（托盘 / 热键线程投递，UI 线程执行）。
+const WM_APP_SHOW: u32 = WM_APP + 11;
+/// 自定义消息：隐藏主窗口。
+const WM_APP_HIDE: u32 = WM_APP + 12;
+
+/// 窗口「应当可见」的期望状态。
+///
+/// 托盘线程写、UI 线程读：窗口还没创建时（托盘模式下压根没起 UI 线程）
+/// 也得把意图记下来，窗口一就绪就按它决定首帧显不显示。
+static WANT_VISIBLE: AtomicBool = AtomicBool::new(true);
+/// 「关闭到托盘」开关。服务线程从配置里读到后写进来，窗口过程据此决定
+/// WM_CLOSE 是「藏起来」还是「真的关掉」。
+static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(true);
 
 /// 最多同时记录多少个被子类化的窗口（主窗口 + 键盘焦点窗口）。
 const MAX_SUBCLASSED: usize = 8;
@@ -126,10 +140,6 @@ impl SubclassRegistry {
 static REGISTRY: SubclassRegistry = SubclassRegistry::new();
 /// 窗口位置是否已经恢复（或本来就没有需要恢复的值）。
 static PLACEMENT_RESTORED: AtomicBool = AtomicBool::new(false);
-/// 启动时应保持隐藏（「启动时最小化」或 `--minimized`）。
-static START_HIDDEN: AtomicBool = AtomicBool::new(false);
-/// 是否已经执行过「启动时隐藏」。
-static START_HIDDEN_APPLIED: AtomicBool = AtomicBool::new(false);
 
 /// 快捷键捕获的结果。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -173,6 +183,15 @@ unsafe extern "system" fn enum_callback(hwnd: HWND, _lparam: LPARAM) -> i32 {
     1
 }
 
+/// 判断某个窗口是不是主窗口。
+///
+/// 键盘焦点窗口（WinUI 3 的隐藏输入窗口）也挂着同一个子类钩子，
+/// 托盘 / 热键的消息只该由主窗口处理。
+fn is_main_window(hwnd: HWND) -> bool {
+    let cached = CACHED_HWND.load(Ordering::SeqCst);
+    !cached.is_null() && std::ptr::eq(cached, hwnd)
+}
+
 fn find_hwnd() -> Option<HWND> {
     let cached = CACHED_HWND.load(Ordering::SeqCst);
     if !cached.is_null() {
@@ -204,8 +223,30 @@ unsafe extern "system" fn subclass_wndproc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    // 窗口关闭不在这里拦截：面板进程关闭即退出，WinUI 的 120 MB 常驻
-    // 内存全部还给系统。托盘图标和路由在常驻服务进程里，继续运行。
+    // 托盘 / 热键发来的显隐消息只该由主窗口处理：键盘焦点窗口也挂着
+    // 同一个子类钩子，不能让它把隐藏窗口的活干了。
+    if is_main_window(hwnd) {
+        // 关闭按钮 / Ctrl+W：开启「关闭到托盘」时把窗口藏起来，应用继续在
+        // 托盘里跑（路由与全局热键都不中断）。关掉该开关则走框架的正常
+        // 关闭流程：窗口销毁 → UI 线程退出 → 整个应用退出。
+        if msg == WM_CLOSE && CLOSE_TO_TRAY.load(Ordering::SeqCst) {
+            ShowWindow(hwnd, SW_HIDE);
+            WANT_VISIBLE.store(false, Ordering::SeqCst);
+            return 0;
+        }
+
+        // 显示 / 隐藏必须回到窗口所属的线程上做，所以托盘线程只投递消息，
+        // 真正的动作在 UI 线程的窗口过程里执行。
+        if msg == WM_APP_SHOW {
+            ShowWindow(hwnd, SW_SHOW);
+            let _ = SetForegroundWindow(hwnd);
+            return 0;
+        }
+        if msg == WM_APP_HIDE {
+            ShowWindow(hwnd, SW_HIDE);
+            return 0;
+        }
+    }
 
     // 快捷键捕获：录制期间拦截所有按键，翻译成 Ctrl+Alt+M 这样的字符串。
     if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
@@ -312,6 +353,8 @@ pub fn install_window_hooks() {
         subclass_window(hwnd);
     }
     MAIN_HOOKED_HWND.store(hwnd as usize, Ordering::SeqCst);
+    // 窗口刚就绪：按期望状态决定显不显示（「启动时最小化」在这里生效）。
+    apply_desired_visibility(hwnd);
     log::info!("Window hooks installed (close-to-tray + placement tracking)");
     subclass_keyboard_focus_window();
 }
@@ -359,27 +402,67 @@ fn subclass_keyboard_focus_window() {
 
 /// 设置「启动时隐藏窗口」。
 ///
-/// 启动时窗口句柄还没创建好，因此这里只记录意图，真正隐藏由
-/// [`apply_start_hidden`] 在窗口就绪后完成。
-pub fn set_start_hidden(enabled: bool) {
-    START_HIDDEN.store(enabled, Ordering::SeqCst);
+/// 托盘模式（开机自启、配置里的「启动时最小化」）下窗口压根不会被创建；
+/// 这里记录的是「窗口真被创建出来时该是什么状态」。
+pub fn set_start_hidden(hidden: bool) {
+    WANT_VISIBLE.store(!hidden, Ordering::SeqCst);
 }
 
-/// 窗口就绪后把窗口隐藏起来（「启动时最小化到托盘」）。
+/// 托盘 / 热键线程调用：显示控制面板窗口。
 ///
-/// 只有真正隐藏成功后才标记为「已应用」：WinUI 的窗口标题在首帧之后
-/// 才就绪，第一次调用往往还找不到句柄，此前若就标记完成，窗口会永远
-/// 显示出来。
-pub fn apply_start_hidden() {
-    if !START_HIDDEN.load(Ordering::SeqCst) || START_HIDDEN_APPLIED.load(Ordering::SeqCst) {
+/// 窗口可能还没创建（托盘模式下没起 UI 线程），所以先记下「应当可见」的
+/// 意图，再把 UI 线程拉起来；窗口就绪后会按这个意图显示。
+pub fn show_window() {
+    request_visibility(true);
+    crate::ui_host::ensure_ui_thread();
+}
+
+/// 托盘菜单调用：显示 / 隐藏控制面板窗口。
+pub fn toggle_window_visibility() {
+    let next = !WANT_VISIBLE.load(Ordering::SeqCst);
+    request_visibility(next);
+    if next {
+        // 隐藏时不需要窗口存在；要显示时才把 UI 线程拉起来。
+        crate::ui_host::ensure_ui_thread();
+    }
+}
+
+/// 设置窗口的期望可见性，并在窗口已经存在时立刻生效。
+fn request_visibility(visible: bool) {
+    WANT_VISIBLE.store(visible, Ordering::SeqCst);
+    let Some(hwnd) = find_hwnd() else {
+        // 窗口还没创建：首帧时按 WANT_VISIBLE 决定显不显示。
+        return;
+    };
+    unsafe {
+        // 显示 / 隐藏必须回到窗口所属的线程上做，所以这里只投递消息。
+        if visible {
+            PostMessageW(hwnd, WM_APP_SHOW, 0, 0);
+        } else {
+            PostMessageW(hwnd, WM_APP_HIDE, 0, 0);
+        }
+    }
+}
+
+/// 窗口就绪后按期望状态显示或隐藏（UI 线程）。
+fn apply_desired_visibility(hwnd: HWND) {
+    let want = WANT_VISIBLE.load(Ordering::SeqCst);
+    let visible = unsafe { IsWindowVisible(hwnd) != 0 };
+    if want == visible {
         return;
     }
-    if let Some(hwnd) = find_hwnd() {
-        unsafe {
+    unsafe {
+        if want {
+            ShowWindow(hwnd, SW_SHOW);
+        } else {
             ShowWindow(hwnd, SW_HIDE);
         }
-        START_HIDDEN_APPLIED.store(true, Ordering::SeqCst);
     }
+}
+
+/// 设置「关闭到托盘」开关（服务线程从配置里读到后写进来）。
+pub fn set_close_to_tray(enabled: bool) {
+    CLOSE_TO_TRAY.store(enabled, Ordering::SeqCst);
 }
 
 // === 快捷键捕获 ===

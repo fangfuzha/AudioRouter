@@ -1,26 +1,27 @@
-//! 桌面集成：托盘图标 + 全局热键。
+//! 桌面集成：托盘图标 + 全局热键（主线程）。
 //!
-//! 服务进程不加载 WinUI 3，因此没有现成的消息循环。托盘图标和全局热键
-//! 都挂在本模块自己创建的隐藏窗口上，由这里的 Win32 消息循环派发。
+//! 主线程是整个应用的「主」：托盘图标、全局热键、Win32 消息循环都在这里。
+//! 控制面板（WinUI 3）跑在另一条 STA 线程上，音频路由跑在服务线程上，
+//! 三者互不阻塞——托盘永远不会因为路由启动要等 5 秒而卡住。
 //!
-//! 注意：托盘菜单项（muda）只能在创建它的那个线程上操作，所以托盘状态
-//! 的更新统一走「主循环写共享数据 → PostMessage 唤醒窗口过程 → 窗口
-//! 过程所在线程真正更新托盘」这条路径。
+//! 注意：托盘菜单项（muda）只能在创建它的那个线程上操作，所以托盘状态的
+//! 更新统一走「服务线程写共享数据 → PostMessage 唤醒窗口过程 → 窗口过程
+//! 所在线程真正更新托盘」这条路径。
 
 use std::cell::RefCell;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::OnceLock;
 
 use anyhow::Result;
+use app_core::bus::{Command, TrayCommand};
 use app_core::hotkey;
 use app_core::i18n::I18n;
-use app_core::paths::{app_config_dir, resolve_asset_path};
-use config::ConfigManager;
+use app_core::paths::resolve_asset_path;
 use parking_lot::Mutex;
 use tray_icon::{
-    Icon, TrayIcon, TrayIconBuilder, TrayIconEvent,
     menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
+    Icon, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -30,25 +31,18 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     TranslateMessage, WM_APP, WM_HOTKEY, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
-use crate::service::ServiceCommand;
-
-/// 托盘菜单命令。
-#[derive(Clone, Copy, Debug)]
-pub enum TrayCommand {
-    /// 显示/唤起控制面板。
-    ShowPanel,
-    StartRouting,
-    StopRouting,
-    Quit,
-}
-
 /// 自定义消息：托盘状态需要更新。
 const WM_TRAY_UPDATE: u32 = WM_APP + 1;
+/// 自定义消息：把控制面板叫起来（第二个实例启动时由它投递）。
+pub const WM_TRAY_SHOW_PANEL: u32 = WM_APP + 2;
+/// 承载托盘与热键的隐藏窗口类名。单实例保证全系统只有一个，
+/// 第二个实例靠它找到常驻实例并把控制面板叫起来。
+pub const TRAY_WINDOW_CLASS: &str = "AudioRouterServiceWindow";
 /// 全局热键 id。
 const HOTKEY_ID: i32 = 0xA17E;
 
-/// 主循环 → 桌面线程的命令通道。
-static COMMAND_TX: OnceLock<Sender<ServiceCommand>> = OnceLock::new();
+/// 主循环 → 服务线程的命令通道。
+static COMMAND_TX: OnceLock<Sender<Command>> = OnceLock::new();
 /// 隐藏窗口句柄（存成 usize 便于放进原子变量）。
 static TRAY_HWND: AtomicUsize = AtomicUsize::new(0);
 /// 待应用的托盘状态。
@@ -98,16 +92,6 @@ fn tooltip_text(i18n: &I18n, running: bool, output_count: usize) -> String {
         i18n.t("AppTitle"),
         status_text(i18n, running, output_count)
     )
-}
-
-/// 读取 settings.toml 里的界面语言。
-pub fn current_i18n() -> I18n {
-    let dir = app_config_dir();
-    let locale = match ConfigManager::load_if_exists(Some(dir)) {
-        Ok(Some(mgr)) => mgr.handle().read().general.language.clone(),
-        _ => app_core::i18n::LOCALE_EN.to_string(),
-    };
-    I18n::new(&locale)
 }
 
 /// 初始化系统托盘图标。
@@ -176,13 +160,13 @@ fn apply_tray_state(i18n: &I18n, running: bool, output_count: usize) {
     });
 }
 
-/// 主循环调用：请求更新托盘状态。
+/// 服务线程调用：请求更新托盘状态。
 pub fn request_tray_update(i18n: &I18n, running: bool, output_count: usize) {
     *PENDING_TRAY.lock() = Some((i18n.clone(), running, output_count));
     wake();
 }
 
-/// 主循环调用：请求重新注册全局热键。
+/// 服务线程调用：请求重新注册全局热键。
 pub fn request_set_hotkey(value: &str) {
     *PENDING_HOTKEY.lock() = Some(value.to_string());
     wake();
@@ -208,7 +192,7 @@ unsafe extern "system" fn service_wndproc(
     match msg {
         WM_HOTKEY => {
             if let Some(tx) = COMMAND_TX.get() {
-                let _ = tx.send(ServiceCommand::HotkeyPressed);
+                let _ = tx.send(Command::HotkeyPressed);
             }
             0
         }
@@ -219,9 +203,14 @@ unsafe extern "system" fn service_wndproc(
             if let Some(value) = PENDING_HOTKEY.lock().take() {
                 let err = register_hotkey(hwnd, &value);
                 if let Some(tx) = COMMAND_TX.get() {
-                    let _ = tx.send(ServiceCommand::HotkeyResult(err));
+                    let _ = tx.send(Command::HotkeyResult(err));
                 }
             }
+            0
+        }
+        // 第二个实例启动时投递：让常驻实例把控制面板显示出来。
+        WM_TRAY_SHOW_PANEL => {
+            crate::window_utils::show_window();
             0
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
@@ -257,7 +246,7 @@ fn register_hotkey(hwnd: HWND, value: &str) -> Option<String> {
 /// 创建承载热键的隐藏窗口。
 fn create_hidden_window() -> Result<HWND> {
     unsafe {
-        let class_name: Vec<u16> = "AudioRouterServiceWindow"
+        let class_name: Vec<u16> = TRAY_WINDOW_CLASS
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
@@ -293,16 +282,21 @@ fn create_hidden_window() -> Result<HWND> {
 }
 
 /// 把托盘图标事件翻译成命令。
+///
+/// 左键单击图标 = **显示**窗口（已经显示时只聚焦，不隐藏）；菜单里的
+/// 「显示 / 隐藏」才是切换。
 fn command_from_tray_event(event: &TrayIconEvent) -> Option<TrayCommand> {
     if let TrayIconEvent::Click {
         button,
         button_state,
         ..
     } = event
-        && *button == tray_icon::MouseButton::Left
-        && *button_state == tray_icon::MouseButtonState::Up
     {
-        return Some(TrayCommand::ShowPanel);
+        if *button == tray_icon::MouseButton::Left
+            && *button_state == tray_icon::MouseButtonState::Up
+        {
+            return Some(TrayCommand::ShowPanel);
+        }
     }
     None
 }
@@ -310,7 +304,7 @@ fn command_from_tray_event(event: &TrayIconEvent) -> Option<TrayCommand> {
 /// 把托盘菜单事件翻译成命令。
 fn command_from_menu_event(event: &MenuEvent, ids: &TrayMenuIds) -> Option<TrayCommand> {
     if event.id == ids.show {
-        Some(TrayCommand::ShowPanel)
+        Some(TrayCommand::TogglePanel)
     } else if event.id == ids.start {
         Some(TrayCommand::StartRouting)
     } else if event.id == ids.stop {
@@ -322,29 +316,30 @@ fn command_from_menu_event(event: &MenuEvent, ids: &TrayMenuIds) -> Option<TrayC
     }
 }
 
-/// 桌面线程：创建窗口、托盘与热键，然后进入消息循环。
-pub fn run(cmd_tx: Sender<ServiceCommand>) -> Result<()> {
+/// 主线程入口：创建窗口、托盘与热键，然后进入消息循环。
+///
+/// `cmd_tx` 是通往服务线程的命令通道：托盘菜单与全局热键都经它转交，
+/// 这样路由状态的修改全部发生在服务线程上。
+pub fn run(cmd_tx: Sender<Command>, hotkey_value: &str, i18n: &I18n) -> Result<()> {
     let _ = COMMAND_TX.set(cmd_tx.clone());
 
     let hwnd = create_hidden_window()?;
     TRAY_HWND.store(hwnd as usize, Ordering::SeqCst);
 
-    let hotkey_value = crate::service::configured_hotkey();
-    // 注册结果回传给服务主循环：被别的程序占用时要让控制面板显示出来。
-    let hotkey_error = register_hotkey(hwnd, &hotkey_value);
-    let _ = cmd_tx.send(ServiceCommand::HotkeyResult(hotkey_error));
+    // 注册结果回传给服务线程：被别的程序占用时要让控制面板显示出来。
+    let hotkey_error = register_hotkey(hwnd, hotkey_value);
+    let _ = cmd_tx.send(Command::HotkeyResult(hotkey_error));
 
-    let i18n = current_i18n();
-    let ids = init_tray(&i18n)?;
+    let ids = init_tray(i18n)?;
 
-    // 托盘事件在后台线程接收，翻译成命令交给服务主循环。
+    // 托盘事件在后台线程接收，翻译成命令交给服务线程。
     {
         let tx = cmd_tx.clone();
         std::thread::spawn(move || {
             let rx = TrayIconEvent::receiver();
             while let Ok(event) = rx.recv() {
                 if let Some(cmd) = command_from_tray_event(&event) {
-                    let _ = tx.send(ServiceCommand::Tray(cmd));
+                    let _ = tx.send(Command::Tray(cmd));
                 }
             }
         });
@@ -355,13 +350,13 @@ pub fn run(cmd_tx: Sender<ServiceCommand>) -> Result<()> {
             let rx = MenuEvent::receiver();
             while let Ok(event) = rx.recv() {
                 if let Some(cmd) = command_from_menu_event(&event, &ids) {
-                    let _ = tx.send(ServiceCommand::Tray(cmd));
+                    let _ = tx.send(Command::Tray(cmd));
                 }
             }
         });
     }
 
-    log::info!("常驻服务桌面线程启动");
+    log::info!("托盘主线程启动");
 
     // 消息循环：托盘图标与热键窗口的消息都在这里派发。
     loop {

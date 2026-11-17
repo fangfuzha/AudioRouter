@@ -1,6 +1,6 @@
 [package]
-name = "winui3_gui"
-version = "0.3.17"
+name = "audiorouter"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.95"
 
@@ -12,12 +12,22 @@ default = []
 # 打包时用 scripts\build-installer.ps1 -DeploymentMode framework-dependent。
 framework-dependent = []
 
+# 单 exe：托盘、路由、控制面板全在这个二进制里。
+[[bin]]
+name = "AudioRouter"
+path = "src/main.rs"
+
 [dependencies]
 app_core = { path = "../app_core" }
 audio_core = { path = "../audio_core" }
 config = { path = "../config" }
+# ureq 3 的默认 TLS provider 是 rustls（native-tls 只是「另外可选」），
+# 少了 rustls 特性会在访问 https 时 panic。旧版本靠 app_core 的 ureq
+# 默认特性把 rustls 打开，现在 app_core 不再依赖 ureq，这里必须显式开。
 ureq = { version = "3", default-features = false, features = [
     "json",
+    "rustls",
+    "gzip",
     "native-tls",
 ] }
 serde = { version = "1", features = ["derive"] }
@@ -30,13 +40,16 @@ anyhow = "1"
 dark-light = "3"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_System_Threading",
     "Win32_System_Registry",
     "Win32_Security",
 ] }
 parking_lot = "0.13"
+tray-icon = { version = "0.26", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [build-dependencies]
 windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", rev = "a48e42ebe507985f2f474c4007fe8db2141371a4" }

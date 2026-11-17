@@ -168,7 +168,7 @@ jobs:
             C:\Users\runneradmin\AppData\Local\AudioRouter\cache
           key: winappsdk-runtime-v1-${{ hashFiles('installer/runtime-version.txt') }}
 
-      - name: Build winui3_gui + audiorouter_service (release)
+      - name: Build audiorouter (release)
         env:
           # 仓库默认 profile 是 lto=true + codegen-units=1（fat LTO 单 codegen unit），
           # 链接阶段无法并行，是整个发布流程最大的耗时点。
@@ -176,9 +176,8 @@ jobs:
           # 链接时间显著下降，仓库默认 profile 保持不变，本地发版仍是 fat LTO。
           CARGO_PROFILE_RELEASE_LTO: thin
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
-        # 控制面板与常驻服务是两个进程，必须一起构建：两个 exe 要装在同一个目录里
-        # （服务靠同目录找到 GUI，面板靠同目录找到服务）。
-        run: cargo build --locked --release --package winui3_gui --package audiorouter_service
+        # 单 exe：托盘、路由、控制面板全在 AudioRouter.exe 里。
+        run: cargo build --locked --release --package audiorouter
 
       # 合并 PFX 解码与 signtool 定位，只执行一次（有证书时）
       - name: Prepare code signing
@@ -208,9 +207,7 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "Signing exe"
-          & $env:SIGNTOOL_PATH sign /v /fd SHA256 /a /tr http://timestamp.digicert.com /td SHA256 "target\release\winui3_gui.exe"
-          # 常驻服务 exe 同样要签名
-          & $env:SIGNTOOL_PATH sign /v /fd SHA256 /a /tr http://timestamp.digicert.com /td SHA256 "target\release\audiorouter_service.exe"
+          & $env:SIGNTOOL_PATH sign /v /fd SHA256 /a /tr http://timestamp.digicert.com /td SHA256 "target\release\AudioRouter.exe"
 
       - name: Build installer with Inno Setup
         shell: pwsh
@@ -240,11 +237,10 @@ jobs:
           # 环境变量会变成 "target^Ld"，cargo 直接报 os error 123。
           CARGO_TARGET_DIR: target/fd
         run: |
-          cargo build --locked --release --package winui3_gui --features winui3_gui/framework-dependent
-          cargo build --locked --release --package audiorouter_service
+          cargo build --locked --release --package audiorouter --features audiorouter/framework-dependent
           # 框架依赖变体的 exe 同样要签名
           if ($env:WINDOWS_SIGN_CERT -and $env:SIGNTOOL_PATH) {
-            foreach ($e in @("target/fd/release/winui3_gui.exe", "target/fd/release/audiorouter_service.exe")) {
+            foreach ($e in @("target/fd/release/AudioRouter.exe")) {
               if (Test-Path $e) {
                 Write-Host "Signing $e"
                 & $env:SIGNTOOL_PATH sign /v /fd SHA256 /a /tr http://timestamp.digicert.com /td SHA256 $e
@@ -294,10 +290,8 @@ jobs:
         with:
           name: build-logs-${{ env.RELEASE_TAG || 'untagged' }}
           path: |
-            target/release/winui3_gui.exe
-            target/release/audiorouter_service.exe
-            target/fd/release/winui3_gui.exe
-            target/fd/release/audiorouter_service.exe
+            target/release/AudioRouter.exe
+            target/fd/release/AudioRouter.exe
             installer/Output/
           if-no-files-found: ignore
           retention-days: 7

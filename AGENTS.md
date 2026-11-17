@@ -10,7 +10,7 @@ device to multiple other output devices simultaneously** (think
 "multi-room from a single source"). Native Rust + WinUI 3 — no WebView,
 no Node.js.
 
-Primary binary: `winui3_gui` (`cargo run -p winui3_gui`).
+Primary binary: `audiorouter` (`cargo run -p audiorouter`).
 
 ## Architecture Map
 
@@ -20,14 +20,12 @@ Workspace members (`Cargo.toml`):
 |---------------|-----------------------------------------------------------------|-----------------------------------------------------|
 | `audio_core`  | WASAPI loopback capture + multi-render, device enum, hot-plug   | `config`, `windows 0.62`, `windows-core 0.62`       |
 | `config`      | Atomic `settings.toml` read/write + schema validation           | `serde`, `toml 1`                                   |
-| `app_core`    | `AppController`, i18n, autostart, IPC protocol, window placement | `audio_core`, `config`, `windows 0.62`             |
-| `audiorouter_service` | 常驻服务：路由 + 托盘 + 全局热键（纯 Win32，不加载 App SDK） | `app_core`, `audio_core`, `config`             |
-| `winui3_gui`  | WinUI 3 控制面板 (windows-reactor)，单实例，代理，更新检查        | `app_core`, `audio_core`, `windows-reactor` (git)  |
+| `app_core`    | `AppController`, i18n, autostart, 进程内命令总线, window placement | `audio_core`, `config`, `windows 0.62`             |
+| `audiorouter` | 唯一入口：托盘 + 路由 + WinUI 3 控制面板（单 exe、多线程）      | `app_core`, `audio_core`, `config`, `windows-reactor` (git)  |
 
-Dependency direction is one-way: `winui3_gui → app_core → audio_core → config`
-and `audiorouter_service → app_core → audio_core → config`.
-Reverse edges are not allowed. The two binaries (`audiorouter_service.exe`,
-`winui3_gui.exe`) talk over a local named pipe, never by linking each other.
+Dependency direction is one-way: `audiorouter → app_core → audio_core → config`.
+Reverse edges are not allowed. 只有一个可执行文件（`AudioRouter.exe`），
+模块之间靠 `app_core::bus` 的进程内命令总线通信，不再有跨进程的命名管道。
 
 Hot path: `router::worker::event_loop` reads from the loopback capture
 client and writes to N render clients on a 3ms timer; see
@@ -39,15 +37,15 @@ client and writes to N render clients on a 3ms timer; see
 - Device enumeration: `audio_core/src/com_service/{device,watcher}.rs`
 - Controller state machine: `app_core/src/controller.rs`
 - Config schema: `config/src/config.rs`
-- WinUI app entry (控制面板): `winui3_gui/src/main.rs`
-- Update + proxy hot-reload: `winui3_gui/src/update.rs`
-- 服务推送消息 → 控制器 → 重绘: `winui3_gui/src/events.rs`
-- Window placement + hotkey capture hooks: `winui3_gui/src/window_utils.rs`
-- 常驻服务入口: `audiorouter_service/src/main.rs`
-- 服务状态机 + 管道服务端: `audiorouter_service/src/service.rs`
-- 服务端托盘 + 全局热键 + 消息循环: `audiorouter_service/src/desktop.rs`
-- 拉起/激活控制面板: `audiorouter_service/src/launcher.rs`
-- IPC 协议 + 管道读写: `app_core/src/ipc.rs`
+- 进程入口（线程编排）: `audiorouter/src/main.rs`
+- 托盘 + 全局热键 + 主线程消息循环: `audiorouter/src/desktop.rs`
+- 服务线程（路由控制 + 设备枚举 + 状态汇总）: `audiorouter/src/runtime.rs`
+- UI 线程宿主（按需创建窗口）: `audiorouter/src/ui_host.rs`
+- WinUI 3 界面: `audiorouter/src/app.rs`
+- Update + proxy hot-reload: `audiorouter/src/update.rs`
+- 服务推送消息 → 控制器 → 重绘: `audiorouter/src/events.rs`
+- Window placement + hotkey capture + 显隐: `audiorouter/src/window_utils.rs`
+- 进程内命令总线（Request / StateSnapshot / Command）: `app_core/src/bus.rs`
 - 共享路径解析（配置目录 / 资源）: `app_core/src/paths.rs`
 - Installer script: `scripts/build-installer.ps1`
 - Inno Setup 脚本: `installer/AudioRouter.iss`
@@ -93,10 +91,10 @@ DLL 就地在 exe 旁边，`.pri` 缺失则**窗口创建失败后静默退出**
 `AudioRouter-Setup-<ver>-x64-fd.exe` 框架依赖），用户自己选。二者 **AppId 相同、
 互斥覆盖**：装了一个再装另一个会替换掉前者，不会并存。
 
-- 模式由 cargo feature `winui3_gui/framework-dependent` 决定：
-  `winui3_gui/build.rs` 读 `CARGO_FEATURE_FRAMEWORK_DEPENDENT` 切换
+- 模式由 cargo feature `audiorouter/framework-dependent` 决定：
+  `audiorouter/build.rs` 读 `CARGO_FEATURE_FRAMEWORK_DEPENDENT` 切换
   `as_framework_dependent()` / `as_self_contained()`；
-  `winui3_gui/src/main.rs` 在建任何 XAML 对象之前调
+  `audiorouter/src/main.rs` 在建任何 XAML 对象之前调
   `windows_reactor::bootstrap()`。
 - **打包脚本会校验模式与 exe 实际形态一致**：自包含的 exe 内嵌了
   `app.manifest`（含 `asmv3:file`），框架依赖的没有；不一致直接 `exit 1`。
@@ -136,44 +134,63 @@ DLL 就地在 exe 旁边，`.pri` 缺失则**窗口创建失败后静默退出**
   之后系统上的 `Microsoft.WindowsAppRuntime.2` 包由 Windows Update /
   Store 自动更新到最新的 2.x（本机实测是 2.6.5.0）。
 
-## Current Status (2026-11-19，进程隔离：托盘/路由常驻，界面可退出)
+## Current Status (2026-11-18，单进程多线程：托盘是主线程，窗口是副线程)
 
-WinUI 3 的框架开销（~120 MB 工作集）是**进程级**的，窗口关掉也不会还回
-系统。因此把「干活的部分」和「界面」拆成两个进程：
+以前这个应用是**两个 exe**：`audiorouter_service.exe`（路由 + 托盘 + 热键）
+和 `winui3_gui.exe`（WinUI 3 控制面板），靠本地命名管道通信。开发时必须
+同时构建两个二进制、还得保证它们同目录，调试一次问题要跨两个进程来回看。
+现在合并成**一个 exe**（`AudioRouter.exe`），同样的职责用多线程拆开。
 
-| 进程 | 职责 | 常驻内存（release 实测） |
+### 线程分工
+
+| 线程 | 职责 | 代码位置 |
 |---|---|---|
-| `audiorouter_service.exe` | 音频路由、设备热插拔、托盘图标、全局热键、命名管道服务端 | **WS 14.8 MB / 私有 2.3 MB** |
-| `winui3_gui.exe` | 控制面板（纯界面） | WS 117 MB / 私有 96 MB（开着才占） |
-
-关闭控制面板 → 面板进程退出（约 0.5s），那 ~96 MB 私有内存全部还给
-系统；托盘图标、路由、全局热键仍在服务进程里跑着，想用的时候从托盘
-或快捷键再把面板叫起来。
+| **主线程** | 托盘图标、全局热键、Win32 消息循环 | `desktop::run()`（进程入口就停在这里） |
+| **服务线程** | 路由启停、设备枚举、状态汇总 | `runtime::run()` |
+| **UI 线程** | WinUI 3 控制面板（STA 公寓） | `ui_host::run_ui()`，**按需创建** |
+| 音频 worker | WASAPI 采集 + 多路渲染 | `audio_core` 内部（热路径） |
 
 ### 关键设计
 
-- **服务不依赖 windows-reactor**，因此不加载 `Microsoft.ui.xaml.dll`，
-  也不会把 D3D 合成器拖进来。托盘与热键跑在服务自己创建的隐藏窗口
-  （`AudioRouterServiceWindow`）上，由服务自己的 `GetMessageW` 循环
-  派发消息（`tray-icon` 只建窗口、不跑消息循环）。
-- **IPC 用本地命名管道** `\\.\pipe\AudioRouter-Service-v1`，自研分帧：
-  4 字节小端长度 + UTF-8 JSON（`serde_json`）。不用 TCP 端口，也不引入
-  第三方 named-pipe crate。
-- **服务是 `settings.toml` 的只读方，GUI 是唯一写入方。** 服务用
-  `ConfigManager::load_if_exists()` 读配置：文件不存在就返回 `None`，
-  绝不抢先创建默认配置（否则会把 GUI 准备好的语言覆盖掉）。
-- **路由配置由服务自己从 `settings.toml` 构建**（`build_router_config()`），
-  GUI 只发 Start/Stop 意图，保证「先落盘再重启」的顺序。
-- **状态推送用 `event_seq` 单调序号去重**，避免重复显示上一次的失败提示。
-- **`close_to_tray` 的语义变了**：现在是「关闭面板后常驻服务是否继续运行」
-  （true = 服务继续，默认值不变，旧 `settings.toml` 不用改；false = 服务
-  一起退出）。面板的关闭按钮与 Ctrl+W 都直接退出面板进程。
-- **开机自启指向 `audiorouter_service.exe`**（`app_core::autostart` 的
-  `autostart_target()`）：开机只需要路由和托盘常驻，面板用不到。
-- **面板从托盘被叫起来时带 `--show`**：配置里的「启动时最小化」在这种
-  场景下不适用，用户是明确点了图标才叫面板的。
+- **路由控制必须离开主线程。** `Router::start()` 最多要等 5 秒才等到音频
+  worker 就绪（`ready_rx.recv_timeout(5s)`），放在主线程会把托盘卡死 5 秒。
+  所以主线程只跑托盘与热键，路由启停交给服务线程。
+- **UI 线程必须是 STA。** WinUI 3 要求 UI 线程是单线程公寓，创建任何 XAML
+  对象之前要先 `CoInitializeEx(COINIT_APARTMENTTHREADED)`。reactor 的
+  `App::run()` 会在**调用它的线程**上初始化公寓并接管消息泵，因此
+  `App::run()` 要放在一条专门 spawn 出来的线程上；reactor 自己也明确
+  支持这种用法（错误信息里写着「from `main` (or another thread you fully
+  own)」）。跨线程的 `AsyncSetState::call` 由 reactor 的 marshaller 负责
+  搬回 UI 线程。
+- **窗口按需创建。** 「启动时最小化」（含开机自启的 `--minimized`）时
+  根本不创建窗口，WindowsAppSDK 那 ~120 MB 的框架开销也就不会在开机时
+  白白吃掉；等用户第一次点托盘图标时，`ui_host::ensure_ui_thread()` 才把
+  UI 线程与窗口建起来。这是单进程架构能保住「低内存常驻」的关键。
+- **进程内命令总线取代命名管道。** 所有跨线程请求汇进一条 `mpsc` 通道
+  （`app_core::bus::Command`），服务线程是唯一的消费者；服务线程回推状态
+  走 `StatePublisher` 回调。管道分帧、连接握手、断开重连那一整套复杂度
+  全部消失。
+- **配置只有一份。** UI 线程与服务线程共享同一个 `ConfigManager`
+  （内部是 `Arc<RwLock<Config>>`），UI 落盘后服务线程立刻读到最新值，
+  不再有「谁先写盘」的竞态，也不用各自去读 `settings.toml`。
+- **`close_to_tray` 回到经典含义**：true = 关窗口 / Ctrl+W 时把窗口
+  **隐藏到托盘**，应用继续在托盘里跑（路由与热键都不中断）；false = 关窗口
+  就退出整个应用。窗口过程拦截 `WM_CLOSE` 并 `ShowWindow(SW_HIDE)`，
+  而不是销毁窗口——`Application::Start` 一个进程只能调一次，窗口一旦
+  销毁就再也叫不回来了。
+- **托盘的「显示 / 隐藏」是真切换。** 以前这个菜单项只有「显示」的实现
+  （`launcher::show_control_panel()` 永远只 `ShowWindow`），点它根本关不掉
+  窗口；托盘「退出」又只杀服务进程，留下一个连不上服务、只会弹「服务连接
+  已断开」的孤儿面板。现在两条路都在同一个进程里：显示/隐藏是真正的显隐
+  切换，退出则整个进程一起退出。
+- **开机自启指向唯一的 exe**（`app_core::autostart` 的 `autostart_target()`），
+  带 `--minimized`，于是开机只有托盘与路由。
+- **第二个实例靠托盘窗口类名找到常驻实例**：`FindWindowW("AudioRouterServiceWindow")`
+  + `PostMessage(WM_TRAY_SHOW_PANEL)`，让常驻实例自己把窗口叫起来。
 
-### 踩过的坑：命名管道上不能留挂起的阻塞读
+### 历史包袱：命名管道上不能留挂起的阻塞读
+
+（拆分进程时代踩过的坑，管道已经删除，留个记录以防将来重新引入 IPC。）
 
 最初服务端用「读线程 + 主循环写」的模型，结果两边互等、整个服务卡死：
 Windows 对同一个 file object 的**同步 I/O 会串行化**——读线程挂着阻塞
@@ -181,12 +198,9 @@ Windows 对同一个 file object 的**同步 I/O 会串行化**——读线程�
 又在等客户端的下一帧，双方互等，**死锁**。表现是「命令要等下一条命令
 才生效」（启动路由被延迟十几秒）。
 
-解决办法（`app_core/src/ipc.rs`）：**读之前先 `PeekNamedPipe` 看有没有
-数据，有才读**，任何时刻都不留挂起的读操作。偷看长度前缀（不消费）还能
-判断整帧是否到齐，避免「读了长度、负载没到」把帧拆散。代价是几毫秒的
-轮询延迟。
-
-写操作仍然是阻塞写：客户端那边一直在读，管道缓冲（64 KB）不会被填满。
+当时的解法是**读之前先 `PeekNamedPipe` 看有没有数据，有才读**，任何时刻
+都不留挂起的读操作。现在是进程内通道，没有这个问题；但如果将来又引入
+跨进程 IPC，别图省事改回阻塞读。
 
 ## Current Status (2026-11-18，内存占用优化)
 
@@ -312,7 +326,7 @@ Event-driven rework of the WinUI frontend:
   screen).
 - **Update check uses mirror fallbacks**: the GitHub API and release assets
   are tried against the official endpoint first, then a list of prefix-style
-  GitHub proxies (`MIRROR_PREFIXES` in `winui3_gui/src/update.rs`).
+  GitHub proxies (`MIRROR_PREFIXES` in `audiorouter/src/update.rs`).
   Override with the `AUDIO_ROUTER_GITHUB_MIRROR` environment variable.
 - `audio_core::Router::subscribe()` added so the GUI can block on router
   events instead of polling `poll_events()`.
@@ -358,7 +372,7 @@ Refactor pass complete. Key changes:
 1. **TODO.md items**:
    - "Update logic added, not verified" — the download half is now covered
      by `update::tests::downloads_latest_installer` (`#[ignore]`, needs
-     network). Run `cargo test -p winui3_gui --bin winui3_gui -- --ignored`
+     network). Run `cargo test -p audiorouter --bin AudioRouter -- --ignored`
      to exercise fetch + download against the real latest release. The
      installer handoff itself (`launch_installer_and_quit`) still needs a
      human pass: it installs over the running build.
@@ -472,11 +486,11 @@ Refactor pass complete. Key changes:
   before message dispatch, sees every key, and tracks the modifier state itself
   (`app_core::hotkey::modifier_bit`) instead of relying on `GetKeyState`.
   See `keyboard_hook()` / `install_capture_hook()` in
-  `winui3_gui/src/window_utils.rs`. The window-procedure path is kept only as a
+  `audiorouter/src/window_utils.rs`. The window-procedure path is kept only as a
   fallback.
 - **A subclassed window may be subclassed only once, and every subclassed
   window needs its own original-wndproc slot.** `SubclassRegistry` (in
-  `winui3_gui/src/window_utils.rs`) keeps one original window procedure per
+  `audiorouter/src/window_utils.rs`) keeps one original window procedure per
   subclassed window; the production code uses the global `REGISTRY`
   instance, tests must use their own instance (Rust runs tests in parallel, and
   the registry is not safe to share across threads). Subclassing the same window
@@ -501,15 +515,34 @@ Refactor pass complete. Key changes:
   (`IWindowNative::WindowHandle`) is tracked in microsoft/windows-rs#5388;
   `main.rs`'s single-instance activation deliberately looks across
   processes and therefore must **not** use the PID filter.
+- **`FindWindowW` 找不到 WinUI 3 的主窗口，必须用 `EnumWindows` +
+  `GetWindowTextW`。** 实测：WinUI 3 窗口的类名是
+  `WinUIDesktopWin32WindowClass`，标题确实是 `AudioRouter`，但
+  `FindWindowW(NULL, "AudioRouter")` 一律返回 0；同一时刻
+  `EnumWindows` 遍历 + `GetWindowTextW` 却能正常找到它。
+  拆分进程时代的托盘「显示面板」正是栽在这里：`launcher::activate_existing()`
+  找不到窗口 → 又去拉起第二个进程 → 第二个进程同样找不到 → 激活不了就
+  退出 → 用户点了托盘图标**什么都不会发生**。
+  现在窗口查找统一走 `window_utils::find_hwnd()`（`EnumWindows`）；
+  第二实例唤醒改用**托盘窗口的类名**
+  （`FindWindowW("AudioRouterServiceWindow", NULL)`）——那是普通 Win32
+  窗口，`FindWindowW` 对它是准的。
+- **ureq 3 的默认 TLS provider 是 rustls，不是 native-tls。**
+  `native-tls` 特性只是「另外可选」，`TlsProvider::default()` 恒为
+  `TlsProvider::Rustls`。少了 `rustls` 特性，访问 https 会在 ureq 内部
+  panic（`provider is Rustls but feature is not enabled`）。以前是靠
+  `app_core` 里那份带默认特性的 ureq 顺带打开的；app_core 不再依赖
+  ureq 之后，必须在真正用到它的 crate 上显式开 `rustls`。
 - **Writing state during a render does not schedule another render.** A
   `SetState::call` inside the render body updates the value but the UI keeps
   showing the previous frame, so a "clear this message" write can leave stale
   text on screen. Derive the text for *this* frame from the data at hand (e.g.
   the hotkey capture result) instead of relying on a follow-up render.
 - **The registered hotkey opens the window, it does not toggle it.** The
-  handler calls `show_and_focus_window()`; the tray menu keeps the
-  show/hide toggle. `app_core::hotkey::describe` renders a captured
-  combination (`Ctrl+Alt+M`) and `is_modifier_key` rejects modifier-only input.
+  handler calls `window_utils::show_window()`; the tray menu keeps the
+  show/hide toggle (`toggle_window_visibility()`). `app_core::hotkey::describe`
+  renders a captured combination (`Ctrl+Alt+M`) and `is_modifier_key` rejects
+  modifier-only input.
 - **`ElementExt::tooltip(text)` never shows anything in WinUI 3.** The
   reactor hands `ToolTipService.SetToolTip` a *boxed* string
   (`IReference<HSTRING>`), but WinUI 3's `ToolTipService::ConvertToToolTip`
@@ -517,7 +550,7 @@ Refactor pass complete. Key changes:
   boxed string is dropped into `ToolTip.Content` untouched, so the tooltip
   stays empty and is never shown (no error, no popup window). Use the rich
   path instead: `tooltip_with(Tooltip::rich(text_block(...)))` (see
-  `hover_hint()` in `winui3_gui/src/app.rs`) creates a real `ToolTip` control
+  `hover_hint()` in `audiorouter/src/app.rs`) creates a real `ToolTip` control
   whose content is a `TextBlock`; that renders correctly in light and dark
   themes.
 - **PowerShell 里 `$env:VAR` 后面紧跟 `:` 会被吞进变量名。**
@@ -540,26 +573,32 @@ Refactor pass complete. Key changes:
   （48kHz / 32bit / 2ch EXTENSIBLE），此时只传格式、不传转换标志即可走
   直通路径。比对逻辑在 `audio_core::com_service::router::formats_equivalent`；
   直通被设备拒绝时会自动回退到带转换的写法（invalidated 不回退）。
-- **命名管道上不能留挂起的阻塞读。** Windows 对同一个 file object 的同步
-  I/O 会串行化：读线程挂着阻塞 `ReadFile` 时，另一个线程往同一条管道
-  `WriteFile` 会一直等那次读返回。服务端「读线程 + 主循环写」的模型会
-  因此死锁（命令要等下一条命令才生效）。`app_core::ipc.rs` 的读法是
-  「先 `PeekNamedPipe` 看有没有数据，有才读」，任何时刻都不留挂起读。
-  新增读路径时务必照做，别图省事改回阻塞读。
-- **服务进程只读 `settings.toml`，GUI 是唯一写入方。** 服务用
-  `ConfigManager::load_if_exists()`：文件不存在时返回 `None`，绝不创建
-  默认配置——否则服务先启动会把 GUI 准备好的系统语言覆盖掉。
-  服务要改配置时，只能通过面板下发的命令（Start/Stop/SetHotkey）。
-- **两个 exe 必须同目录。** 服务靠 `sibling_exe(GUI_EXE_NAME)` 找面板，
-  面板靠 `sibling_exe(SERVICE_EXE_NAME)` 找服务（`app_core::ipc`）。
-  安装脚本会把 `target/release` 下的全部 exe 打进 staging 目录。
-- **关窗口 = 面板进程退出。** `window_utils` 不再拦截 `WM_CLOSE`（原来
-  是 `ShowWindow(SW_HIDE)` 隐藏到托盘），`app.run()` 返回后主进程退出，
-  WinUI 的 ~96 MB 私有内存随之释放。`close_to_tray` 现在表示「关闭面板
-  后常驻服务是否继续运行」，不是「窗口是否隐藏到托盘」。
-- **服务进程不要引入 windows-reactor。** 它一进来就会加载
-  `Microsoft.ui.xaml.dll` 与 D3D 合成器，~120 MB 常驻内存就白费了——
-  拆进程的全部意义就在于让这部分内存跟着面板进程一起退出。
+- **跨线程命令只有一条通道。** UI 请求、托盘菜单、全局热键、设备变化、
+  路由事件全部汇进 `app_core::bus::Command` 这条 mpsc 通道，服务线程是
+  唯一的消费者。这样所有状态变更都发生在同一个线程上，不必为「谁在改
+  状态」操心；服务线程回推状态走 `StatePublisher` 回调。
+- **配置只有一份，UI 线程与服务线程共享同一个 `ConfigManager`**
+  （内部是 `Arc<RwLock<Config>>`）。UI 落盘后服务线程立刻读到最新值，
+  不再有「谁先写盘」的竞态，也不用各自去读 `settings.toml`。
+  `ConfigManager` 因此必须保持 `Clone`（克隆共享同一份内存状态）。
+- **只有一个 exe**（`AudioRouter.exe`），不再有「同目录找另一个 exe」的
+  逻辑。打包脚本只检查这一个文件，`installer/AudioRouter.iss` 的
+  `[InstallDelete]` 会清掉旧版本遗留的 `winui3_gui.exe` /
+  `audiorouter_service.exe`。
+- **关窗口 = 隐藏到托盘（默认）。** `window_utils` 拦截 `WM_CLOSE` 并
+  `ShowWindow(SW_HIDE)`，而不是销毁窗口——`Application::Start` 一个进程
+  只能调一次，窗口一旦销毁就再也叫不回来了。`close_to_tray = false` 时
+  才让框架走正常关闭流程，UI 线程退出 → 整个进程退出。
+- **UI 线程是按需创建的。** 「启动时最小化」（含开机自启的 `--minimized`）
+  时不创建窗口，WindowsAppSDK 与 D3D 合成器也就不会被加载进来，
+  ~120 MB 常驻内存不会白吃。托盘「显示」时才 `ui_host::ensure_ui_thread()`
+  把 UI 线程与窗口建起来。**别在托盘模式下无条件启动 UI 线程**，否则
+  「低内存常驻」就没了。
+- **路由启停不要放主线程。** `Router::start()` 最多等 5 秒才等到音频 worker
+  就绪，放在主线程会把托盘卡死。服务线程就是为这件事存在的。
+- **显隐必须回到窗口所属的线程。** 托盘线程只 `PostMessage`
+  `WM_APP_SHOW` / `WM_APP_HIDE`，真正的 `ShowWindow` 在 UI 线程的窗口
+  过程里执行；跨线程直接 `ShowWindow` 不可靠。
 - **内存占用基线（2026-11 实测，release 构建，WinUI 3 自包含部署）。**
   空闲态约 123 MB 工作集 / 105 MB 私有字节，其中绝大部分是 Windows App
   SDK（`Microsoft.ui.xaml.dll` 14 MB + `Microsoft.UI.Xaml.Controls.dll`
@@ -572,7 +611,7 @@ Refactor pass complete. Key changes:
 Release is driven by `.github/workflows/release-windows.yml`, which triggers on
 pushing a `v*` tag and uploads an Inno Setup installer to a GitHub Release.
 
-1. Bump `version` in `winui3_gui/Cargo.toml` to the next patch version — it
+1. Bump `version` in `audiorouter/Cargo.toml` to the next patch version — it
    must match the tag, otherwise "check for updates" compares the wrong
    version (the GUI reads it from `CARGO_PKG_VERSION`).
 2. Commit the bump together with the code changes.
@@ -642,10 +681,8 @@ Run from `D:\my_project\AudioRouter`:
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --lib
-cargo build -p audiorouter_service         # debug：常驻服务（必须与 GUI 同目录）
-cargo build -p winui3_gui                  # debug：控制面板
-cargo build --release -p winui3_gui        # release
-cargo build --release -p audiorouter_service   # release：常驻服务
+cargo build -p audiorouter                 # debug：单 exe（托盘 + 路由 + 控制面板）
+cargo build --release -p audiorouter       # release
 ```
 
 CI 在 `windows-latest` 上跑 `cargo fmt` + `cargo clippy`（`lint` job）
@@ -662,8 +699,7 @@ To produce an installer:
 
 # 框架依赖变体：exe 必须用 framework-dependent 特性编译
 $env:CARGO_TARGET_DIR = "target\fd"
-cargo build --release -p winui3_gui --features winui3_gui/framework-dependent
-cargo build --release -p audiorouter_service
+cargo build --release -p audiorouter --features audiorouter/framework-dependent
 .\scripts\build-installer.ps1 -NoBuild -Version 0.4.0 -DeploymentMode framework-dependent -CargoTargetDir "target\fd"
 ```
 
@@ -674,7 +710,7 @@ cargo build --release -p audiorouter_service
 ## Conventions
 
 - Use `parking_lot` (not `std::sync::Mutex`) when adding shared state
-  in `winui3_gui` or `app_core`.
+  in `audiorouter` or `app_core`.
 - COM interfaces crossing thread boundaries should be wrapped in
   `ComSend<T>` only when the type isn't already `Send`+`Sync`; prefer
   the raw interface and rely on the `windows` crate's own wrappers

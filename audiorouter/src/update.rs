@@ -597,7 +597,7 @@ mod tests {
 
     /// 真实下载链路验证：需要联网，默认跳过。
     ///
-    /// 跑法：`cargo test -p winui3_gui --bin winui3_gui -- --ignored`
+    /// 跑法：`cargo test -p audiorouter --bin AudioRouter -- --ignored`
     ///
     /// 覆盖「拉取最新 release → 找到安装包 asset → 下载落盘」这条链路，
     /// 用来确认 GitHub API、镜像回退和临时目录写入都还正常。

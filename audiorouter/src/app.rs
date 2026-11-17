@@ -150,7 +150,6 @@ impl Component for RootComponent {
         // 这里每帧尝试，直到成功（成功后内部直接返回，开销可忽略）。
         window_utils::install_window_hooks();
         window_utils::restore_window_placement();
-        window_utils::apply_start_hidden();
 
         // 一次性副作用:在组件 mount 时向 Application.Resources 注入 Pane 背景
         // 覆盖资源,这样 NavigationView 的 Pane 背景才能在亮/暗主题下都正确。

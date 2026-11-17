@@ -23,7 +23,7 @@ pub fn app_config_dir() -> PathBuf {
 ///
 /// 全部找不到则返回 `{exe_dir}/{rel_path}`（调用方自己判断 exists）。
 pub fn resolve_asset_path(rel_path: &str) -> PathBuf {
-    let exe_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("winui3_gui.exe"));
+    let exe_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("AudioRouter.exe"));
     let exe_dir = exe_path
         .parent()
         .map(|p| p.to_path_buf())

@@ -1,6 +1,6 @@
 //! 应用控制层，封装与具体 GUI 框架无关的状态和操作。
 
-use crate::ipc::{Request, RouterEvent, ServiceClient, StateSnapshot};
+use crate::bus::{Request, RouterEvent, ServiceHandle, StateSnapshot};
 use audio_core::com_service::device::DeviceInfo;
 use audio_core::router::{ChannelMode, RouterConfig, RouterTarget};
 use config::ConfigManager;
@@ -36,7 +36,8 @@ pub enum StartBlock {
 /// 应用业务状态和操作入口。
 pub struct AppController {
     pub config_manager: ConfigManager,
-    pub service: ServiceClient,
+    /// 进程内服务句柄：把请求丢给服务线程。
+    pub service: ServiceHandle,
     pub i18n: I18n,
     pub devices: Vec<DeviceInfo>,
     pub selected_source: Option<String>,
@@ -55,7 +56,7 @@ pub struct AppController {
 }
 
 impl AppController {
-    pub fn new(config_manager: ConfigManager, service: ServiceClient) -> Self {
+    pub fn new(config_manager: ConfigManager, service: ServiceHandle) -> Self {
         let cfg = config_manager.handle().read().clone();
         let locale = cfg.general.language.clone();
 

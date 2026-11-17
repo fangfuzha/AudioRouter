@@ -3,15 +3,14 @@
 
 #define MyAppName "AudioRouter"
 #define MyAppPublisher "AudioRouter"
-#define MyAppExeName "winui3_gui.exe"
+#define MyAppExeName "AudioRouter.exe"
 #define MyAppId "{{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}"
 
 #ifndef MyAppVersion
   #define MyAppVersion "0.1.0"
 #endif
 
-; 常驻服务 exe 的文件名（与 app_core::ipc::SERVICE_EXE_NAME 保持一致）
-#define MyServiceExeName "audiorouter_service.exe"
+; 单 exe 架构：托盘、路由、控制面板全在 {#MyAppExeName} 里。
 
 ; 安装包文件名后缀：框架依赖变体用 -fd 区分，避免和自包含包重名互相覆盖。
 #ifndef MyPackageSuffix
@@ -22,10 +21,12 @@
 ; 缺了就直接报错，避免装出一个「面板找不到服务」的残缺安装包。
 ; staging 目录由 scripts\build-installer.ps1 生成。
 ; ISPP 的 FileExists 用相对路径时以脚本所在目录为基准。
-#if FileExists("..\target\installer-staging\audiorouter_service.exe")
-  ; 常驻服务 exe 已就位
+; 注意：这里写死文件名而不是用 {#MyAppExeName} —— ISPP 在 #if 条件表达式里
+; 不一定会展开字符串宏，写死最稳。改 exe 名字时这里要同步改。
+#if FileExists("..\target\installer-staging\AudioRouter.exe")
+  ; 主 exe 已就位
 #else
-  #error 缺少 audiorouter_service.exe：请先运行 scripts\build-installer.ps1 生成 staging 目录
+  #error 缺少 AudioRouter.exe：请先运行 scripts\build-installer.ps1 生成 staging 目录
 #endif
 
 ; 编译期检查：部署模式对应的运行时文件必须齐。
@@ -104,13 +105,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; 注意：.pri 文件是 WinUI 3 必需的 XAML 资源索引，缺少会导致窗口创建
 ; 失败后静默退出。.mui 文件是框架多语言资源，按系统语言加载。
 ;
-; 常驻服务 exe 单独列在下面（这里先排除，避免同一个文件装两次）。
-Source: "..\target\installer-staging\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "{#MyServiceExeName}"
-
-; 常驻服务进程（纯 Win32，承载路由 / 托盘 / 全局热键）。
-; 必须和控制面板 exe 在同一个目录：面板靠同目录找到服务，
-; 服务也靠同目录找到面板（app_core::ipc::sibling_exe）。
-Source: "..\target\installer-staging\{#MyServiceExeName}"; DestDir: "{app}"; Flags: ignoreversion
+; 整个 staging 目录一次性装进去：主 exe + WindowsAppRuntime 运行时文件。
+Source: "..\target\installer-staging\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; 应用资源文件（图标等）
 Source: "..\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -123,10 +119,17 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilen
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 
 [UninstallRun]
-; 卸载前先结束两个进程：正在运行的 exe 无法被删除，
-; 常驻服务是后台常驻的，必须显式结束。
-Filename: "taskkill"; Parameters: "/F /IM {#MyServiceExeName}"; Flags: runhidden; RunOnceId: "StopAudioRouterService"
-Filename: "taskkill"; Parameters: "/F /IM winui3_gui.exe"; Flags: runhidden; RunOnceId: "StopAudioRouterPanel"
+; 卸载前先结束进程：正在运行的 exe 无法被删除。
+; 旧版本（拆分进程时代）的两个 exe 也要结束，否则它们会留在后台，
+; 继续占着托盘图标和音频设备。
+Filename: "taskkill"; Parameters: "/F /IM {#MyAppExeName}"; Flags: runhidden; RunOnceId: "StopAudioRouter"
+Filename: "taskkill"; Parameters: "/F /IM audiorouter_service.exe"; Flags: runhidden; RunOnceId: "StopLegacyService"
+Filename: "taskkill"; Parameters: "/F /IM winui3_gui.exe"; Flags: runhidden; RunOnceId: "StopLegacyPanel"
+
+[InstallDelete]
+; 升级时清掉旧版本遗留的两个 exe（拆分进程时代的产物）。
+Type: files; Name: "{app}\audiorouter_service.exe"
+Type: files; Name: "{app}\winui3_gui.exe"
 
 [Run]
 ; 注意：不能使用 skipifsilent，否则 /VERYSILENT 静默安装（自动更新场景）

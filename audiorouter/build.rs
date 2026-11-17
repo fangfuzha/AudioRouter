@@ -20,7 +20,7 @@ fn main() {
     // 把项目根目录的 assets/icon.ico 嵌入到 exe 资源段。
     // 嵌入后 exe 本身携带图标资源，Windows 资源管理器、任务栏、开始菜单、
     // 桌面快捷方式都会显示该图标（无需依赖外部 ico 文件）。
-    // Cargo.toml 中 manifest_dir 指向 winui3_gui/，所以 ../assets 指向项目根。
+    // Cargo.toml 中 manifest_dir 指向 audiorouter/，所以 ../assets 指向项目根。
     let icon_path = std::path::Path::new("..").join("assets").join("icon.ico");
     if icon_path.exists() {
         let mut res = winres::WindowsResource::new();

@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     此脚本完成端到端的发布流程：
-      1. 校验版本号与 winui3_gui/Cargo.toml 一致
+      1. 校验版本号与 audiorouter/Cargo.toml 一致
       2. 检查 gh CLI 是否已认证
       3. 调用 build-installer.ps1 本地构建 + Inno Setup 打包
       4. 创建 git tag（可选）并推送
@@ -12,7 +12,7 @@
 
 .PARAMETER Version
     要发布的版本号。支持 "0.3.3" 或 "v0.3.3" 两种格式。
-    留空则从 winui3_gui/Cargo.toml 自动读取。
+    留空则从 audiorouter/Cargo.toml 自动读取。
 
 .PARAMETER SkipTag
     跳过创建/推送 git tag。默认为 true，因为推送 tag 会触发 release-windows.yml
@@ -71,7 +71,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-$CargoToml = Join-Path $ProjectRoot "winui3_gui\Cargo.toml"
+$CargoToml = Join-Path $ProjectRoot "audiorouter\Cargo.toml"
 
 function Get-CargoVersion {
     if (-not (Test-Path $CargoToml)) {
@@ -126,7 +126,7 @@ if ($Version) {
     $Version = Normalize-Version $Version
     if ($Version -ne $cargoVersion) {
         Write-Host "Error: Requested version ($Version) does not match Cargo.toml ($cargoVersion)." -ForegroundColor Red
-        Write-Host "Update winui3_gui/Cargo.toml first, or omit -Version to use Cargo.toml's version." -ForegroundColor Yellow
+        Write-Host "Update audiorouter/Cargo.toml first, or omit -Version to use Cargo.toml's version." -ForegroundColor Yellow
         exit 1
     }
 } else {

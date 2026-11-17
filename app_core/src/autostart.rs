@@ -72,15 +72,12 @@ fn set_autostart_inner(enabled: bool) -> Result<()> {
 
 /// 开机自启要拉起的程序。
 ///
-/// 架构拆成两个进程之后，开机只需要常驻服务（路由 + 托盘 + 热键），
-/// 控制面板是随用随开的。因此优先指向同目录下的 `audiorouter_service.exe`；
-/// 找不到它时（例如开发环境里只编了 GUI）才退回当前进程。
+/// 单进程架构下只有一个 exe：开机启动它并带上 `--minimized`，
+/// 于是进程起来后只有托盘图标与路由在跑，控制面板不弹出来——
+/// 这正是拆分进程时代「指向常驻服务 exe」的行为。
 ///
-/// 第二个返回值表示是否要附加 `--minimized`（只有退回 GUI 时才需要）。
+/// 第二个返回值表示是否要附加 `--minimized`。
 fn autostart_target() -> (std::path::PathBuf, bool) {
-    if let Some(service) = crate::ipc::sibling_exe(crate::ipc::SERVICE_EXE_NAME) {
-        return (service, false);
-    }
     (std::env::current_exe().unwrap_or_default(), true)
 }
 
@@ -100,24 +97,20 @@ mod tests {
     #[test]
     fn quotes_autostart_path() {
         let cmd = autostart_command(
-            std::path::Path::new(r"C:\Program Files\AudioRouter\winui3_gui.exe"),
+            std::path::Path::new(r"C:\Program Files\AudioRouter\AudioRouter.exe"),
             true,
         );
         assert_eq!(
             cmd,
-            r#""C:\Program Files\AudioRouter\winui3_gui.exe" --minimized"#
+            r#""C:\Program Files\AudioRouter\AudioRouter.exe" --minimized"#
         );
     }
 
     #[test]
-    fn service_target_has_no_minimized_flag() {
-        let cmd = autostart_command(
-            std::path::Path::new(r"C:\Program Files\AudioRouter\audiorouter_service.exe"),
-            false,
-        );
-        assert_eq!(
-            cmd,
-            r#""C:\Program Files\AudioRouter\audiorouter_service.exe""#
-        );
+    fn autostart_always_starts_minimized() {
+        // 单进程架构：开机自启指向唯一的 exe，并带上 --minimized，
+        // 于是开机只有托盘图标，不会弹出控制面板。
+        let (_exe, minimized) = autostart_target();
+        assert!(minimized);
     }
 }

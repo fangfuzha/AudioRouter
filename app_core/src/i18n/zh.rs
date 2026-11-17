@@ -57,7 +57,7 @@ pub const ZH_MAP: &[(&str, &str)] = &[
     ("Restarting", "设备已变更，正在重启..."),
     ("Restarted", "路由已恢复"),
     ("RoutingFailed", "路由失败：{error}"),
-    ("CloseToTray", "关闭面板后常驻服务继续运行"),
+    ("CloseToTray", "关闭窗口时隐藏到托盘"),
     ("CheckForUpdates", "检查更新"),
     ("CheckingForUpdates", "正在检查更新..."),
     ("UpdateAvailable", "发现新版本"),
@@ -117,7 +117,7 @@ pub const ZH_MAP: &[(&str, &str)] = &[
     ("HotkeyInUse", "该热键已被其他程序占用，请换一个"),
     (
         "CloseToTrayHint",
-        "关闭按钮与 Ctrl+W 都会关闭控制面板，常驻服务继续运行",
+        "关闭按钮与 Ctrl+W 都会把窗口隐藏到托盘，托盘图标、路由与全局热键继续运行",
     ),
     ("DiagnosticsSection", "诊断"),
     ("OpenConfigFolder", "打开配置目录"),

@@ -80,7 +80,7 @@ function Find-InnoSetup {
 
 function Get-Version {
     if ($Version) { return $Version }
-    $cargo = Join-Path $ProjectRoot "winui3_gui\Cargo.toml"
+    $cargo = Join-Path $ProjectRoot "audiorouter\Cargo.toml"
     if (Test-Path $cargo) {
         $content = Get-Content $cargo -Raw
         if ($content -match 'version\s*=\s*"([^"]+)"') {
@@ -417,12 +417,11 @@ Write-Host "Version: $appVersion"
 
 if (-not $NoBuild) {
     Write-Host ""
-    Write-Host "=== Building winui3_gui + audiorouter_service ($Config) ===" -ForegroundColor Cyan
+    Write-Host "=== Building audiorouter ($Config) ===" -ForegroundColor Cyan
     Push-Location $ProjectRoot
-    # 控制面板与常驻服务是两个进程，必须一起构建：服务 exe 要和 GUI exe
-    # 放在同一个目录里（服务靠同目录找到 GUI，面板靠同目录找到服务）。
+    # 单 exe：托盘、路由、控制面板全在 AudioRouter.exe 里。
     # --locked 与 CI 保持一致：Cargo.lock 必须与各 manifest 一致
-    cargo build --locked --$Config --package winui3_gui --package audiorouter_service
+    cargo build --locked --$Config --package audiorouter
     if ($LASTEXITCODE -ne 0) {
         Pop-Location
         Write-Host "Build failed!" -ForegroundColor Red
@@ -431,21 +430,13 @@ if (-not $NoBuild) {
     Pop-Location
 }
 
-$exePath = Join-Path $TargetDir "winui3_gui.exe"
+$exePath = Join-Path $TargetDir "AudioRouter.exe"
 if (-not (Test-Path $exePath)) {
     Write-Host "Error: Executable not found at $exePath" -ForegroundColor Red
     exit 1
 }
 $exeSize = [math]::Round((Get-Item $exePath).Length / 1MB, 2)
 Write-Host "Executable: $exePath ($exeSize MB)" -ForegroundColor Green
-
-$serviceExePath = Join-Path $TargetDir "audiorouter_service.exe"
-if (-not (Test-Path $serviceExePath)) {
-    Write-Host "Error: Service executable not found at $serviceExePath" -ForegroundColor Red
-    exit 1
-}
-$serviceSize = [math]::Round((Get-Item $serviceExePath).Length / 1MB, 2)
-Write-Host "Service executable: $serviceExePath ($serviceSize MB)" -ForegroundColor Green
 
 # 决定部署模式
 $detectedMode = Get-ExeDeploymentMode -ExePath $exePath
@@ -475,8 +466,7 @@ if (Test-Path $StagingDir) {
 New-Item -ItemType Directory -Path $StagingDir -Force | Out-Null
 
 Copy-Item $exePath -Destination $StagingDir -Force
-Copy-Item $serviceExePath -Destination $StagingDir -Force
-Write-Host "  Exes: winui3_gui.exe, audiorouter_service.exe"
+Write-Host "  Exe: AudioRouter.exe"
 
 if ($resolvedMode -eq "framework-dependent") {
     Install-FrameworkDependentRuntime -DestDir $StagingDir
@@ -493,8 +483,8 @@ Write-Host ("  Staged dirs : {0}" -f $stagedDirs.Count)
 $stagingSize = [math]::Round((Get-ChildItem $StagingDir -Recurse -File | Measure-Object Length -Sum).Sum / 1MB, 2)
 Write-Host "  Staging size: $stagingSize MB" -ForegroundColor Green
 
-# 打包前的最后校验：两个可执行文件必须都在 staging 里。
-foreach ($required in @("winui3_gui.exe", "audiorouter_service.exe")) {
+# 打包前的最后校验：可执行文件必须在 staging 里。
+foreach ($required in @("AudioRouter.exe")) {
     $requiredPath = Join-Path $StagingDir $required
     if (-not (Test-Path $requiredPath)) {
         Write-Host "Error: $required missing from staging dir $StagingDir" -ForegroundColor Red
