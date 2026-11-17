@@ -12,10 +12,10 @@
 - 每个输出设备都可以单独「试听」，确认哪个是哪个音箱
 - 每个输出设备可单独选择声道模式（立体声 / 单声道 / 左右声道互换等）
 - 纯 Rust 实现，原生 Windows 应用，无 WebView/Node.js 依赖
-- 系统托盘常驻，关闭窗口自动隐藏到托盘
-- 托盘菜单实时显示当前路由状态，路由失败时窗口闪烁提醒
-- 可自定义全局热键（留空表示不注册），保存后立即生效
-- `Ctrl+W` 关闭窗口（与点击标题栏关闭按钮行为一致，受「关闭到托盘」设置控制）
+- 路由与托盘跑在**常驻服务进程**里，控制面板关闭后立即退出，WinUI 的上百 MB 内存全部还给系统
+- 系统托盘常驻（由服务进程承载），托盘菜单实时显示当前路由状态
+- 可自定义全局热键（留空表示不注册），保存后立即生效；按下热键可随时唤出控制面板
+- `Ctrl+W` 与标题栏关闭按钮行为一致：关闭控制面板进程（托盘与路由仍在服务进程里继续运行）
 - 记住窗口位置、大小与侧栏展开状态，下次启动自动恢复
 - 首次启动按系统 UI 语言自动选择中文/英文界面，之后可在设置中随时切换
 
@@ -36,13 +36,14 @@ cargo build --release --package winui3_gui
 ## 项目结构
 
 ```
-audio_core/      # 音频核心库（设备枚举、路由引擎）
-config/          # 配置管理（settings.toml）
-app_core/        # 应用核心逻辑（控制器、i18n、自动启动）
-winui3_gui/      # WinUI 3 桌面 GUI
-installer/       # Inno Setup 安装脚本
-scripts/         # 构建与打包脚本
-assets/          # 共享资源（图标等）
+audio_core/        # 音频核心库（设备枚举、路由引擎）
+config/            # 配置管理（settings.toml）
+app_core/          # 应用核心逻辑（控制器、i18n、自动启动、IPC）
+audiorouter_service/  # 常驻服务：路由 + 托盘 + 全局热键（纯 Win32）
+winui3_gui/        # WinUI 3 控制面板
+installer/         # Inno Setup 安装脚本 + 运行时文件清单
+scripts/           # 构建与打包脚本
+assets/            # 共享资源（图标等）
 ```
 
 ## 打包发布
@@ -53,6 +54,8 @@ assets/          # 共享资源（图标等）
 
 - 安装 [Inno Setup 6](https://jrsoftware.org/isdl.php)（推荐）
 - 或设置环境变量 `ISCC_PATH` 指向 `ISCC.exe` 的完整路径
+- 打包时会自动下载 Windows App Runtime 的 nupkg（约 160 MB）并校验，
+  无需手动准备运行时
 
 ### 生成安装包
 
@@ -68,6 +71,47 @@ assets/          # 共享资源（图标等）
 ```
 
 生成的安装包位于 `installer/Output/` 目录下，文件名形如 `AudioRouter-Setup-<版本>-x64.exe`。
+
+### 运行时从哪来
+
+安装包里的 Windows App Runtime **不是**从 `target/` 里"顺带"拷的，而是
+打包脚本按 `installer/runtime-files.txt` 的白名单，从
+`Microsoft.WindowsAppSDK.Runtime` 的 nupkg → MSIX 里重新抽取的。
+
+这样做的原因：上游 `windows_reactor_setup` 是把运行时拷进 `target/` 的
+**build script 副作用**，sccache 命中时 build script 根本不执行，副作用
+就没了 —— v0.3.12~v0.3.16 的安装包因此只有 exe，干净机器上装完是坏的。
+
+现在打包脚本会**逐条校验**清单：必需条目少一个就直接失败（不会产出坏包），
+可选条目（语言资源）缺失只给提示。
+
+运行时版本写在 `installer/runtime-version.txt`（当前 `2.3.1`，与上游
+windows-reactor-setup 的 pin 一致），可用 `-RuntimeVersion <版本>` 临时覆盖。
+清单分两段：`required` 段缺一个就打包失败，`optional` 段（语言资源）缺失
+只提示。
+
+版本要和上游 pin 保持一致：exe 内嵌的 `app.manifest`、Rust 侧的 WinRT
+绑定、以及 `cargo run` 用的运行时都是按上游那版生成的。要换版本就整套
+换（先升 windows-rs pin），只换打包用的 DLL 会让开发环境和产品环境跑两套
+运行时。打包脚本检测到版本不一致会打印警告。
+
+### 两种部署模式
+
+| 模式 | 安装包 | 目标电脑要求 |
+|---|---|---|
+| 自包含（默认） | 约 16 MB，含整套运行时 | 无需安装 Windows App Runtime |
+| 框架依赖 | 约 4 MB，只含 bootstrapper | 需已安装 Windows App Runtime；没有的话首次启动会弹官方快速安装界面 |
+
+构建框架依赖变体：
+
+```powershell
+$env:CARGO_TARGET_DIR = "target\fd"
+cargo build --release -p winui3_gui --features winui3_gui/framework-dependent
+cargo build --release -p audiorouter_service
+.\scripts\build-installer.ps1 -NoBuild -Version 1.0.0 -DeploymentMode framework-dependent -CargoTargetDir "target\fd"
+```
+
+打包脚本会检查"指定的模式"与"exe 实际形态"是否一致，不一致直接失败。
 
 ### 安装包特性
 
@@ -104,7 +148,8 @@ assets/          # 共享资源（图标等）
 - **audio_core** — 纯音频库。`router` 负责 WASAPI loopback 捕获 + 多端渲染(共享模式,SRC 自动转换),支持设备 invalidated 自动重启 + 指数退避重试。`com_service::device` 提供设备枚举 / 热插拔通知(`DeviceWatcher`)。
 - **app_core** — Controller 把 GUI 调用翻译成 `Router.start / stop`,管理 `ConfigManager`,处理 i18n、自动启动、GitHub Release 更新检查与下载。
 - **config** — `settings.toml` 原子写入(临时文件 + rename),启动时 schema 校验(版本号 + outputs 唯一性)。
-- **winui3_gui** — WinUI 3 前端,windows-reactor 反应式组件。托盘 / 单例 / 代理热加载 / 关闭到托盘等平台行为都在这一层。
+- **winui3_gui** — WinUI 3 控制面板,windows-reactor 反应式组件。只负责界面,单例 / 代理热加载 / 更新检查等平台行为在这一层。
+- **audiorouter_service** — 常驻服务进程(纯 Win32,不加载 Windows App SDK)。音频路由 / 设备热插拔 / 系统托盘 / 全局热键都在这里,面板进程退出后它继续常驻。
 
 ## 开发工作流
 

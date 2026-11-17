@@ -87,8 +87,10 @@ dependencies = [
  "audio_core",
  "config",
  "log",
+ "parking_lot",
  "semver",
  "serde",
+ "serde_json",
  "ureq",
  "windows",
 ]
@@ -242,6 +244,24 @@ dependencies = [
  "tokio",
  "windows",
  "windows-core 0.62.2",
+]
+
+[[package]]
+name = "audiorouter_service"
+version = "0.3.17"
+dependencies = [
+ "anyhow",
+ "app_core",
+ "audio_core",
+ "config",
+ "env_logger",
+ "image",
+ "log",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tray-icon",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2546,7 +2566,7 @@ dependencies = [
 
 [[package]]
 name = "winui3_gui"
-version = "0.3.16"
+version = "0.3.17"
 dependencies = [
  "anyhow",
  "app_core",
@@ -2554,12 +2574,10 @@ dependencies = [
  "config",
  "dark-light",
  "env_logger",
- "image",
  "log",
  "parking_lot",
  "semver",
  "serde",
- "tray-icon",
  "ureq",
  "windows-core 0.62.2",
  "windows-reactor",

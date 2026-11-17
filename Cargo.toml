@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["audio_core", "config", "app_core", "winui3_gui"]
+members = ["audio_core", "config", "app_core", "winui3_gui", "audiorouter_service"]
 
 # Release 编译优化：优先提高运行时性能并减小产物体积
 # - opt-level=3: 最大化运行时性能

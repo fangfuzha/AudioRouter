@@ -7,28 +7,23 @@ use parking_lot::Mutex;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetFocus, GetKeyState, RegisterHotKey, UnregisterHotKey, VK_CONTROL, VK_ESCAPE, VK_LWIN,
-    VK_MENU, VK_RWIN, VK_SHIFT,
+    GetFocus, GetKeyState, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CallWindowProcW, DefWindowProcW, EnumWindows, FlashWindowEx,
     GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW, GetWindowPlacement, GetWindowTextW,
-    GetWindowThreadProcessId, IsWindow, IsWindowVisible, PostMessageW, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx,
-    FLASHWINFO, FLASHW_ALL, GWLP_WNDPROC, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
-    SW_HIDE, SW_MAXIMIZE, SW_SHOW, WH_KEYBOARD_LL, WINDOWPLACEMENT, WM_CLOSE, WM_EXITSIZEMOVE,
-    WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_NCDESTROY, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    GetWindowThreadProcessId, IsWindow, IsWindowVisible, PostMessageW, SetWindowLongPtrW,
+    SetWindowPos, SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx, FLASHWINFO, FLASHW_ALL,
+    GWLP_WNDPROC, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE,
+    WH_KEYBOARD_LL, WINDOWPLACEMENT, WM_CLOSE, WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYUP, WM_NCDESTROY,
+    WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 /// `SC_KEYMENU`：Alt（或 F10）触发的系统菜单命令。
 const SC_KEYMENU: usize = 0xF100;
 
-/// 全局热键 id（同一窗口只能注册有限个，用固定值即可）。
-const HOTKEY_ID: i32 = 0xA17E;
-
 static CACHED_HWND: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
-static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(true);
 /// 主窗口句柄（钩好之后记住，避免每帧重新枚举窗口）。
 static MAIN_HOOKED_HWND: AtomicUsize = AtomicUsize::new(0);
 
@@ -135,9 +130,6 @@ static PLACEMENT_RESTORED: AtomicBool = AtomicBool::new(false);
 static START_HIDDEN: AtomicBool = AtomicBool::new(false);
 /// 是否已经执行过「启动时隐藏」。
 static START_HIDDEN_APPLIED: AtomicBool = AtomicBool::new(false);
-/// 当前已注册的全局热键（0 表示没有注册）。
-static REGISTERED_HOTKEY_VK: AtomicU32 = AtomicU32::new(0);
-static REGISTERED_HOTKEY_MODS: AtomicU32 = AtomicU32::new(0);
 
 /// 快捷键捕获的结果。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -212,16 +204,8 @@ unsafe extern "system" fn subclass_wndproc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if msg == WM_CLOSE && CLOSE_TO_TRAY.load(Ordering::SeqCst) {
-        ShowWindow(hwnd, SW_HIDE);
-        return 0;
-    }
-
-    // 全局热键：打开主窗口（已经在前台时只聚焦，不隐藏）。
-    if msg == WM_HOTKEY && wparam as i32 == HOTKEY_ID {
-        show_and_focus_window();
-        return 0;
-    }
+    // 窗口关闭不在这里拦截：面板进程关闭即退出，WinUI 的 120 MB 常驻
+    // 内存全部还给系统。托盘图标和路由在常驻服务进程里，继续运行。
 
     // 快捷键捕获：录制期间拦截所有按键，翻译成 Ctrl+Alt+M 这样的字符串。
     if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
@@ -373,66 +357,28 @@ fn subclass_keyboard_focus_window() {
     log::info!("Keyboard focus window {focus_addr} subclassed for hotkey capture");
 }
 
-pub fn set_close_to_tray(enabled: bool) {
-    CLOSE_TO_TRAY.store(enabled, Ordering::SeqCst);
-}
-
+/// 设置「启动时隐藏窗口」。
+///
+/// 启动时窗口句柄还没创建好，因此这里只记录意图，真正隐藏由
+/// [`apply_start_hidden`] 在窗口就绪后完成。
 pub fn set_start_hidden(enabled: bool) {
-    if enabled {
-        START_HIDDEN.store(true, Ordering::SeqCst);
-    }
+    START_HIDDEN.store(enabled, Ordering::SeqCst);
 }
 
+/// 窗口就绪后把窗口隐藏起来（「启动时最小化到托盘」）。
+///
+/// 只有真正隐藏成功后才标记为「已应用」：WinUI 的窗口标题在首帧之后
+/// 才就绪，第一次调用往往还找不到句柄，此前若就标记完成，窗口会永远
+/// 显示出来。
 pub fn apply_start_hidden() {
-    if !START_HIDDEN.load(Ordering::SeqCst) || START_HIDDEN_APPLIED.swap(true, Ordering::SeqCst) {
+    if !START_HIDDEN.load(Ordering::SeqCst) || START_HIDDEN_APPLIED.load(Ordering::SeqCst) {
         return;
     }
     if let Some(hwnd) = find_hwnd() {
         unsafe {
             ShowWindow(hwnd, SW_HIDE);
         }
-    }
-}
-
-pub fn configure_global_hotkey(value: &str) -> Result<(), String> {
-    let hwnd = find_hwnd().ok_or_else(|| "window handle not found".to_string())?;
-    let parsed = if value.trim().is_empty() {
-        None
-    } else {
-        Some(app_core::hotkey::parse(value).map_err(|e| e.to_string())?)
-    };
-    let old_vk = REGISTERED_HOTKEY_VK.swap(0, Ordering::SeqCst);
-    let old_mods = REGISTERED_HOTKEY_MODS.swap(0, Ordering::SeqCst);
-    if old_vk != 0 {
-        unsafe {
-            UnregisterHotKey(hwnd, HOTKEY_ID);
-        }
-    }
-    let Some(hotkey) = parsed else {
-        return Ok(());
-    };
-    let ok = unsafe { RegisterHotKey(hwnd, HOTKEY_ID, hotkey.modifiers, hotkey.vk) };
-    if ok == 0 {
-        if old_vk != 0 {
-            let _ = unsafe { RegisterHotKey(hwnd, HOTKEY_ID, old_mods, old_vk) };
-            REGISTERED_HOTKEY_VK.store(old_vk, Ordering::SeqCst);
-            REGISTERED_HOTKEY_MODS.store(old_mods, Ordering::SeqCst);
-        }
-        return Err("hotkey is already in use".to_string());
-    }
-    REGISTERED_HOTKEY_MODS.store(hotkey.modifiers, Ordering::SeqCst);
-    REGISTERED_HOTKEY_VK.store(hotkey.vk, Ordering::SeqCst);
-    Ok(())
-}
-
-pub fn unregister_global_hotkey() {
-    if REGISTERED_HOTKEY_VK.swap(0, Ordering::SeqCst) != 0 {
-        if let Some(hwnd) = find_hwnd() {
-            unsafe {
-                UnregisterHotKey(hwnd, HOTKEY_ID);
-            }
-        }
-        REGISTERED_HOTKEY_MODS.store(0, Ordering::SeqCst);
+        START_HIDDEN_APPLIED.store(true, Ordering::SeqCst);
     }
 }
 
@@ -766,38 +712,11 @@ fn clamp_to_virtual_screen(rect: WindowRect) -> Option<(i32, i32)> {
     Some((rect.left.clamp(vx, max_x), rect.top.clamp(vy, max_y)))
 }
 
-#[allow(dead_code)]
-pub fn show_window() {
-    if let Some(hwnd) = find_hwnd() {
-        unsafe {
-            ShowWindow(hwnd, SW_SHOW);
-        }
-    }
-}
-
-#[allow(dead_code)]
-pub fn hide_window() {
-    if let Some(hwnd) = find_hwnd() {
-        unsafe {
-            ShowWindow(hwnd, SW_HIDE);
-        }
-    }
-}
-
-pub fn show_and_focus_window() {
-    if let Some(hwnd) = find_hwnd() {
-        unsafe {
-            ShowWindow(hwnd, SW_SHOW);
-            let _ = SetForegroundWindow(hwnd);
-        }
-    }
-}
-
 /// 关闭窗口，语义与点击标题栏关闭按钮完全一致。
 ///
-/// 这里投递 `WM_CLOSE` 而不是直接 `ShowWindow(SW_HIDE)` / `DestroyWindow`，
-/// 是为了复用子类化钩子里已有的处理：开启「关闭到托盘」时隐藏窗口，
-/// 关闭时真正退出应用。
+/// 这里投递 `WM_CLOSE` 而不是直接 `DestroyWindow`，是为了让框架走完整的
+/// 关闭流程（保存窗口位置等）。窗口关闭即面板进程退出，托盘图标与路由
+/// 由常驻服务进程继续承载。
 pub fn close_window() {
     let Some(hwnd) = find_hwnd() else {
         log::warn!("Ctrl+W: window handle not found, cannot close");
@@ -829,22 +748,6 @@ pub fn flash_window_if_hidden() {
             dwTimeout: 0,
         };
         FlashWindowEx(&info);
-    }
-}
-
-pub fn toggle_window() {
-    if let Some(hwnd) = find_hwnd() {
-        unsafe {
-            if IsWindowVisible(hwnd) != 0 {
-                ShowWindow(hwnd, SW_HIDE);
-            } else {
-                ShowWindow(hwnd, SW_SHOW);
-                // 显示后聚焦窗口，使键盘输入和焦点正确。
-                // SetForegroundWindow 在某些情况下会因系统前台锁定失败，
-                // 但在 UI 线程定时器中调用通常可生效。
-                let _ = SetForegroundWindow(hwnd);
-            }
-        }
     }
 }
 

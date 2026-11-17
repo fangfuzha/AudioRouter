@@ -1,182 +1,72 @@
-//! 后台事件源：把设备热插拔、路由状态、托盘交互转成 UI 重绘请求。
+//! 后台事件源：把常驻服务推送的状态写回控制器，并请求一次重绘。
 //!
-//! 早期实现用一个 700ms 的 `DispatcherTimer` 轮询所有状态，既有最长
-//! 700ms 的延迟，又让 UI 每 700ms 无条件重绘一次。现在改为事件驱动：
-//!
-//! - 设备热插拔：COM `IMMNotificationClient`（audio_core::device_watcher）
-//! - 路由状态：audio_core::Router::subscribe() 提供的订阅通道
-//! - 托盘交互：tray-icon / muda 的全局事件通道
-//!
-//! 后台线程只做两件事：投递事件、请求重绘。所有真正的 UI 操作
-//! （刷新设备列表、执行托盘命令）仍然在 UI 线程的 render 中完成，
-//! 避免跨线程操作 Win32 窗口。
+//! 设备枚举、路由启停、托盘与全局热键都发生在常驻服务进程里。服务把
+//! 状态快照推过来，这里只负责把它写回控制器并触发 UI 重绘。
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::RecvTimeoutError;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
 
-use app_core::controller::AppController;
-use audio_core::device_watcher::DeviceWatcher;
+use app_core::controller::{AppController, StatusLevel};
+use app_core::ipc::ServerMessage;
 use parking_lot::Mutex;
 use windows_reactor::AsyncSetState;
 
-use crate::tray::{command_from_menu_event, command_from_tray_event, TrayCommand};
-
-/// 后台线程投递给 UI 线程的待处理事件。
-#[derive(Default)]
-pub struct PendingEvents {
-    /// 路由 worker 产生了新事件，需要同步运行状态。
-    pub router_dirty: bool,
-    /// 托盘命令（必须在 UI 线程执行）。
-    pub tray_commands: Vec<TrayCommand>,
-}
-
-/// 请求 UI 重绘的句柄（可跨线程克隆）。
+/// 跨线程的重绘请求句柄。
 ///
-/// windows-reactor 的 `AsyncSetState` 在写入相同值时会跳过更新，
-/// 所以每次请求都写入一个新的计数值，保证重绘一定被触发。
-#[derive(Clone)]
-pub struct RenderRequest {
+/// windows-reactor 的 `AsyncSetState` 写入相同值时会跳过更新，所以每次
+/// 请求都写入一个新的计数值，保证重绘一定被触发。
+#[derive(Clone, Default)]
+pub struct RenderSignal {
     counter: Arc<AtomicU64>,
-    setter: AsyncSetState<u64>,
+    setter: Arc<Mutex<Option<AsyncSetState<u64>>>>,
 }
 
-impl RenderRequest {
-    /// 创建重绘请求句柄。
-    ///
-    /// `counter` 与 `setter` 来自同一个组件的状态槽，保证计数单调递增。
-    pub fn new(counter: Arc<AtomicU64>, setter: AsyncSetState<u64>) -> Self {
-        Self { counter, setter }
+impl RenderSignal {
+    /// 绑定 UI 线程创建的状态槽（每次渲染都会重新绑定同一个槽）。
+    pub fn attach(&self, setter: AsyncSetState<u64>) {
+        *self.setter.lock() = Some(setter);
     }
 
     /// 请求一次 UI 重绘（可从任意线程调用）。
     pub fn request(&self) {
+        let setter = self.setter.lock().clone();
+        let Some(setter) = setter else {
+            // UI 还没挂载，等下一次状态推送或者首帧渲染即可。
+            return;
+        };
         let next = self.counter.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
-        self.setter.call(next);
+        setter.call(next);
     }
 }
 
-/// 启动全部后台事件源。
+/// 创建服务推送消息的回调：写回控制器 + 请求重绘。
 ///
-/// `watcher_slot` 用来持有设备 watcher 句柄：一旦句柄被释放，
-/// COM 通知回调会注销，设备热插拔就再也收不到了。
-pub fn spawn_event_sources(
-    controller: Arc<Mutex<AppController>>,
-    pending: Arc<Mutex<PendingEvents>>,
-    watcher_slot: Arc<Mutex<Option<DeviceWatcher>>>,
-    render: RenderRequest,
-) {
-    spawn_device_watcher(Arc::clone(&controller), watcher_slot, render.clone());
-    spawn_router_watcher(controller, Arc::clone(&pending), render.clone());
-    spawn_tray_watcher(pending, render);
-}
-
-/// 设备热插拔监听。
-///
-/// 设备枚举需要 COM 多线程公寓（MTA），而 WinUI 的 UI 线程是单线程公寓
-/// （STA），在 UI 线程上枚举设备会得到 RPC_E_CHANGED_MODE(0x80010106)。
-/// 因此枚举放在这个后台线程里做：该线程没有预初始化 COM，
-/// `ComApartment::mta()` 可以正常生效。
-fn spawn_device_watcher(
-    controller: Arc<Mutex<AppController>>,
-    watcher_slot: Arc<Mutex<Option<DeviceWatcher>>>,
-    render: RenderRequest,
-) {
-    let (watcher, rx) = match DeviceWatcher::start() {
-        Ok(pair) => pair,
-        Err(e) => {
-            log::warn!("Failed to start device watcher, device list will not auto-refresh: {e}");
+/// `controller_slot` 里放的是控制器的强引用，但控制器要等服务连接建立
+/// 之后才创建，所以先用一个 OnceLock 占位。
+pub fn make_service_callback(
+    controller_slot: Arc<OnceLock<Arc<Mutex<AppController>>>>,
+    render: RenderSignal,
+) -> Arc<dyn Fn(ServerMessage) + Send + Sync + 'static> {
+    Arc::new(move |msg| {
+        let Some(controller) = controller_slot.get() else {
+            // 控制器还没建好，这条消息作废；界面就绪后会主动要一次状态。
             return;
-        }
-    };
-
-    // 句柄必须一直存活，否则 COM 通知会被注销。
-    *watcher_slot.lock() = Some(watcher);
-
-    std::thread::spawn(move || {
-        // 设备事件可能密集到来：音量变化、属性写入都会触发
-        // OnPropertyValueChanged。逐个响应会把设备列表反复枚举、反复重绘，
-        // 既费 CPU 又制造大量临时分配（每次枚举都要新建 COM 对象和字符串）。
-        //
-        // 这里做一次尾随去抖：收到事件后等一小段时间，期间再有事件只
-        // 刷新计时器；安静下来之后才真正枚举一次设备。
-        const DEBOUNCE: Duration = Duration::from_millis(300);
-
-        while rx.recv().is_ok() {
-            loop {
-                match rx.recv_timeout(DEBOUNCE) {
-                    // 安静了 DEBOUNCE 这么久，可以处理了
-                    Err(RecvTimeoutError::Timeout) => break,
-                    Err(RecvTimeoutError::Disconnected) => return,
-                    // 又来一个事件，继续等
-                    Ok(_) => continue,
-                }
-            }
-            {
-                let mut c = controller.lock();
-                c.refresh_devices();
-            }
-            render.request();
-        }
-    });
-}
-
-/// 路由状态监听。
-fn spawn_router_watcher(
-    controller: Arc<Mutex<AppController>>,
-    pending: Arc<Mutex<PendingEvents>>,
-    render: RenderRequest,
-) {
-    let rx = {
-        let c = controller.lock();
-        c.router.subscribe()
-    };
-
-    std::thread::spawn(move || {
-        while rx.recv().is_ok() {
-            {
-                let mut p = pending.lock();
-                p.router_dirty = true;
-            }
-            render.request();
-        }
-    });
-}
-
-/// 托盘交互监听（图标点击 + 菜单项）。
-fn spawn_tray_watcher(pending: Arc<Mutex<PendingEvents>>, render: RenderRequest) {
-    let Some(menu_ids) = crate::tray::menu_item_ids() else {
-        log::warn!("Tray menu ids unavailable, tray menu events are ignored");
-        return;
-    };
-
-    let tray_rx = crate::tray::tray_event_receiver();
-    let menu_rx = crate::tray::menu_event_receiver();
-    let pending_tray = Arc::clone(&pending);
-    let render_tray = render.clone();
-
-    std::thread::spawn(move || {
-        while let Ok(event) = tray_rx.recv() {
-            if let Some(cmd) = command_from_tray_event(&event) {
+        };
+        match msg {
+            ServerMessage::State(snapshot) => {
                 {
-                    let mut p = pending_tray.lock();
-                    p.tray_commands.push(cmd);
+                    let mut c = controller.lock();
+                    c.apply_service_state(*snapshot);
                 }
-                render_tray.request();
+                render.request();
             }
-        }
-    });
-
-    std::thread::spawn(move || {
-        while let Ok(event) = menu_rx.recv() {
-            if let Some(cmd) = command_from_menu_event(&event, &menu_ids) {
+            ServerMessage::Error { message } => {
                 {
-                    let mut p = pending.lock();
-                    p.tray_commands.push(cmd);
+                    let mut c = controller.lock();
+                    c.set_status(StatusLevel::Error, message);
                 }
                 render.request();
             }
         }
-    });
+    })
 }

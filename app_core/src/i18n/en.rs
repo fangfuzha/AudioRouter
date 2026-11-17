@@ -75,7 +75,7 @@ pub const EN_MAP: &[(&str, &str)] = &[
     ("Restarting", "Device changed, restarting..."),
     ("Restarted", "Routing restored"),
     ("RoutingFailed", "Routing failed: {error}"),
-    ("CloseToTray", "Minimize to tray on close"),
+    ("CloseToTray", "Keep background service running after close"),
     ("CheckForUpdates", "Check for Updates"),
     ("CheckingForUpdates", "Checking for updates..."),
     ("UpdateAvailable", "New version available"),
@@ -144,7 +144,7 @@ pub const EN_MAP: &[(&str, &str)] = &[
     ),
     (
         "CloseToTrayHint",
-        "Both the close button and Ctrl+W hide the window to tray",
+        "The close button and Ctrl+W close the panel; the background service keeps running",
     ),
     ("DiagnosticsSection", "Diagnostics"),
     ("OpenConfigFolder", "Open Config Folder"),

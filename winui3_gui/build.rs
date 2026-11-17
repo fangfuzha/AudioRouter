@@ -1,5 +1,21 @@
 fn main() {
-    windows_reactor_setup::as_self_contained();
+    // 部署模式：
+    // - 默认：自包含。WindowsAppRuntime 的运行时 DLL 随安装包发布，同时把
+    //   app.manifest 嵌进 exe（清单声明了必须就地加载的那些 DLL）。
+    // - framework-dependent 特性：框架依赖。exe 不内嵌清单，运行时用系统上
+    //   已安装的 WindowsAppRuntime 包；缺失时由 bootstrapper 弹快速安装。
+    //
+    // build script 里拿不到 #[cfg(feature)]，只能用 CARGO_FEATURE_* 环境变量。
+    //
+    // 注意：这两个函数都会往 target 目录拷文件（自包含拷整个运行时，框架依赖
+    // 拷 bootstrapper）。这是 build script 的副作用，sccache 命中时不会发生 ——
+    // 所以打包脚本不依赖它们，自己从 nupkg/MSIX 准备运行时。
+    let framework_dependent = std::env::var_os("CARGO_FEATURE_FRAMEWORK_DEPENDENT").is_some();
+    if framework_dependent {
+        windows_reactor_setup::as_framework_dependent();
+    } else {
+        windows_reactor_setup::as_self_contained();
+    }
 
     // 把项目根目录的 assets/icon.ico 嵌入到 exe 资源段。
     // 嵌入后 exe 本身携带图标资源，Windows 资源管理器、任务栏、开始菜单、

@@ -1,14 +1,12 @@
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use app_core::controller::{AppController, StartBlock, StatusLevel};
-use audio_core::device_watcher::DeviceWatcher;
 use audio_core::router::ChannelMode;
 use windows_reactor::*;
 
-use crate::events::{PendingEvents, RenderRequest};
-use crate::tray::TrayCommand;
+use crate::events::RenderSignal;
 use crate::window_utils;
 
 /// 生成一个能正常弹出的悬浮提示（tooltip）。
@@ -99,16 +97,12 @@ const GITHUB_REPO_URL: &str = "https://github.com/fangfuzha/AudioRouter";
 
 pub struct RootComponent {
     controller: Arc<Mutex<AppController>>,
-    /// 重绘计数：后台线程递增后写入 AsyncSetState，触发 UI 重绘。
-    tick: Arc<AtomicU64>,
-    /// 后台线程投递的待处理事件（设备变化 / 路由事件 / 托盘命令）。
-    pending: Arc<Mutex<PendingEvents>>,
-    /// 设备热插拔 watcher 句柄，必须保持存活，否则 COM 通知会被注销。
-    device_watcher: Arc<Mutex<Option<DeviceWatcher>>>,
+    /// 跨线程重绘句柄：常驻服务推送状态后用它请求一次重绘。
+    render: RenderSignal,
     /// 更新检查状态（后台线程写入，UI 线程读取）。
     update_state: Arc<Mutex<UpdateState>>,
-    /// 上一次同步到托盘的运行状态，避免每帧都去写托盘菜单。
-    tray_status: Arc<Mutex<Option<(bool, usize)>>>,
+    /// 上一次渲染时是不是处于「错误」状态，用来在错误刚发生时提示一次。
+    error_notified: Arc<AtomicBool>,
     /// 框架首次加载模板时会把 `NavigationView.IsPaneOpen` 强制改回默认值
     /// （展开），我们在挂载阶段声明的「收起」会被丢弃。这个标记表示
     /// 「接下来第一个 IsPaneOpen 事件是框架的重置，而不是用户操作」。
@@ -118,128 +112,50 @@ pub struct RootComponent {
 }
 
 impl RootComponent {
-    pub fn new(controller: Arc<Mutex<AppController>>) -> Self {
+    pub fn new(controller: Arc<Mutex<AppController>>, render: RenderSignal) -> Self {
         Self {
             controller,
-            tick: Arc::new(AtomicU64::new(0)),
-            pending: Arc::new(Mutex::new(PendingEvents::default())),
-            device_watcher: Arc::new(Mutex::new(None)),
+            render,
             update_state: Arc::new(Mutex::new(UpdateState::Idle)),
-            tray_status: Arc::new(Mutex::new(None)),
+            error_notified: Arc::new(AtomicBool::new(false)),
             pane_override_pending: Arc::new(AtomicBool::new(false)),
             pane_first_render: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    /// 应用后台线程投递的事件（只在 UI 线程调用）。
-    fn apply_pending_events(&self) {
-        let (router_dirty, tray_commands) = {
-            let mut p = self.pending.lock();
-            (
-                std::mem::take(&mut p.router_dirty),
-                std::mem::take(&mut p.tray_commands),
-            )
-        };
-
-        // 设备枚举在后台线程完成（COM 公寓限制），这里只同步路由状态。
-        if router_dirty {
-            let mut c = self.controller.lock();
-            c.poll_router_events();
-            let failed = c.status_level == StatusLevel::Error;
-            drop(c);
-            if failed {
-                // 路由在后台失败时，若窗口已隐藏到托盘，界面上的提示根本看不到，
-                // 闪烁任务栏图标提醒用户。
-                window_utils::flash_window_if_hidden();
-            }
-        }
-
-        // 托盘命令必须在 UI 线程执行：SetForegroundWindow 等调用
-        // 只有在 UI 线程上才 reliably 生效。
-        for cmd in tray_commands {
-            match cmd {
-                TrayCommand::ToggleWindow => window_utils::toggle_window(),
-                TrayCommand::ShowWindow => window_utils::show_and_focus_window(),
-                TrayCommand::StartRouting => {
-                    self.controller.lock().start_routing();
-                }
-                TrayCommand::StopRouting => {
-                    self.controller.lock().stop_routing();
-                }
-                TrayCommand::Quit => {
-                    let mut controller = self.controller.lock();
-                    if controller.is_running {
-                        controller.stop_routing();
-                    }
-                    std::process::exit(0);
-                }
-            }
         }
     }
 }
 
 impl Component for RootComponent {
     fn render(&self, _props: &(), cx: &mut RenderCx) -> Element {
-        // 跨线程安全的重绘触发器：后台线程调用 request() 即可请求重绘，
-        // 不再依赖定时器轮询共享状态。
+        // 跨线程安全的重绘触发器：常驻服务推送状态后调用 request() 即可
+        // 请求重绘，不依赖定时器轮询共享状态。
         let (_tick_val, set_tick) = cx.use_async_state(0u64);
-        let render_request = RenderRequest::new(Arc::clone(&self.tick), set_tick.clone());
+        self.render.attach(set_tick.clone());
 
-        // 先把后台线程投递的事件应用掉（UI 线程）。
-        self.apply_pending_events();
-
-        // 托盘常驻时主界面看不到，状态必须同步到托盘（状态行 / 启停可用性 /
-        // tooltip）。只在状态变化时写一次，避免每帧都动托盘菜单。
-        {
-            // 托盘状态没变就完全不碰词表。界面每帧都会走到这里，
-            // 克隆只放在「状态真的变了」的分支里。
-            let (running, count, changed) = {
-                let c = self.controller.lock();
-                let running = c.is_running;
-                let count = c.enabled_output_count();
-                let changed = {
-                    let mut cache = self.tray_status.lock();
-                    let changed = cache.map(|c| c != (running, count)).unwrap_or(true);
-                    *cache = Some((running, count));
-                    changed
-                };
-                (running, count, changed)
-            };
-            if changed {
-                let c = self.controller.lock();
-                crate::tray::update_tray_status(&c.i18n, running, count);
+        // 路由在服务进程里失败时，状态是服务推过来的。窗口若隐藏着
+        //（启动时最小化），界面上的提示根本看不到，闪烁任务栏图标提醒用户。
+        // 只在「刚刚变成错误状态」时闪一次，避免一直闪。
+        let status_is_error = {
+            let c = self.controller.lock();
+            c.status_level == StatusLevel::Error
+        };
+        if status_is_error {
+            if !self.error_notified.swap(true, Ordering::SeqCst) {
+                window_utils::flash_window_if_hidden();
             }
+        } else {
+            self.error_notified.store(false, Ordering::SeqCst);
         }
 
         // 窗口钩子与位置恢复：WinUI 的窗口标题在首帧之后才就绪，
         // 这里每帧尝试，直到成功（成功后内部直接返回，开销可忽略）。
         window_utils::install_window_hooks();
         window_utils::restore_window_placement();
-        let start_minimized = self.controller.lock().start_minimized();
-        window_utils::set_start_hidden(start_minimized);
         window_utils::apply_start_hidden();
 
         // 一次性副作用:在组件 mount 时向 Application.Resources 注入 Pane 背景
         // 覆盖资源,这样 NavigationView 的 Pane 背景才能在亮/暗主题下都正确。
         cx.use_effect((), || {
             crate::pane_bg_override::install_pane_background_overrides();
-        });
-
-        // 一次性副作用：启动后台事件源（设备热插拔 / 路由事件 / 托盘交互），
-        // 并恢复上次退出时的窗口位置。
-        cx.use_effect((), {
-            let render_request = render_request.clone();
-            let controller = Arc::clone(&self.controller);
-            let pending = Arc::clone(&self.pending);
-            let watcher_slot = Arc::clone(&self.device_watcher);
-            move || {
-                crate::events::spawn_event_sources(
-                    controller,
-                    pending,
-                    watcher_slot,
-                    render_request,
-                );
-            }
         });
 
         let initial_expanded = {
@@ -309,10 +225,10 @@ impl Component for RootComponent {
 
         // 捕获到组合键后请求一次重绘（回调发生在 UI 线程的窗口过程里）。
         cx.use_effect((), {
-            let render_request = render_request.clone();
+            let render = self.render.clone();
             move || {
                 window_utils::set_capture_listener(Arc::new(move || {
-                    render_request.request();
+                    render.request();
                 }));
             }
         });
@@ -336,22 +252,6 @@ impl Component for RootComponent {
         // 启动时的 backdrop 已在 main.rs 中通过 App::backdrop 在窗口创建阶段
         // 直接应用，无需在此处 use_effect 中事后设置。
 
-        // 启动时从配置加载 close_to_tray 设置并安装窗口子类化
-        let close_to_tray_initial = {
-            let c = self.controller.lock();
-            c.close_to_tray()
-        };
-        cx.use_effect(close_to_tray_initial, move || {
-            window_utils::set_close_to_tray(close_to_tray_initial);
-        });
-
-        let global_hotkey = self.controller.lock().global_hotkey();
-        cx.use_effect(global_hotkey.clone(), move || {
-            if let Err(error) = window_utils::configure_global_hotkey(&global_hotkey) {
-                log::warn!("Failed to register global hotkey: {error}");
-            }
-        });
-
         // 启动时后台静默检查更新（受配置控制）
         let auto_update_enabled = {
             let c = self.controller.lock();
@@ -361,7 +261,7 @@ impl Component for RootComponent {
         };
         let update_state_clone = Arc::clone(&self.update_state);
         cx.use_effect(auto_update_enabled, {
-            let render_request = render_request.clone();
+            let render_request = self.render.clone();
             move || {
                 if !auto_update_enabled {
                     return;
@@ -407,7 +307,7 @@ impl Component for RootComponent {
 
         main_app(
             Arc::clone(&self.controller),
-            render_request,
+            self.render.clone(),
             set_nav_expanded,
             pane_declared,
             set_pane_declared,
@@ -427,7 +327,7 @@ impl Component for RootComponent {
 #[allow(clippy::too_many_arguments)]
 fn main_app(
     controller: Arc<Mutex<AppController>>,
-    render_request: RenderRequest,
+    render: RenderSignal,
     set_nav_expanded: SetState<bool>,
     pane_declared: bool,
     set_pane_declared: SetState<bool>,
@@ -447,7 +347,7 @@ fn main_app(
 
     // 刷新句柄：UI 线程和后台线程都可以调用，用来请求一次重绘。
     let make_setter = {
-        let render = render_request.clone();
+        let render = render.clone();
         move || render.request()
     };
 
@@ -991,6 +891,7 @@ fn settings_page(
         close_to_tray,
         auto_update_check,
         global_hotkey,
+        hotkey_error,
         lang_index,
         theme_index,
         backdrop_index,
@@ -1018,6 +919,7 @@ fn settings_page(
             draft.close_to_tray,
             draft.auto_update_check,
             draft.global_hotkey.clone(),
+            c.hotkey_error.clone(),
             lang_idx,
             theme_idx,
             backdrop_idx,
@@ -1117,28 +1019,12 @@ fn settings_page(
             }
         }
 
-        let new_close_to_tray = c.draft_general.close_to_tray;
-        let lang_changed = match c.save_general_config() {
-            Ok(value) => value,
-            Err(error) => {
-                log::warn!("Failed to save general settings: {error}");
-                let text = save_i18n.t("SaveFailed").replace("{error}", &error);
-                set_error.call(Some(text));
-                return;
-            }
-        };
-        if lang_changed.is_some() {
-            crate::tray::update_tray_language(&c.i18n);
-        }
-        window_utils::set_close_to_tray(new_close_to_tray);
-
-        // 热键立即生效：注销旧的、注册新的。
-        // 被其他程序占用时保留旧热键，并把原因显示在设置页里。
-        let hotkey = c.global_hotkey();
-        if let Err(error) = window_utils::configure_global_hotkey(&hotkey) {
-            log::warn!("Failed to apply global hotkey immediately: {error}");
-            set_error.call(Some(save_i18n.t("HotkeyInUse").to_string()));
-            save_refresh();
+        // 保存设置：控制器会把新的全局热键同步给常驻服务（热键由服务进程
+        // 注册），并让服务刷新托盘菜单（语言变了托盘文案也要跟着变）。
+        if let Err(error) = c.save_general_config() {
+            log::warn!("Failed to save general settings: {error}");
+            let text = save_i18n.t("SaveFailed").replace("{error}", &error);
+            set_error.call(Some(text));
             return;
         }
 
@@ -1163,6 +1049,20 @@ fn settings_page(
                     .is_closable(false),
             )
             .with_key("settings.error"),
+        );
+    }
+
+    // 热键在服务进程里注册，被别的程序占用时错误由服务推回来，
+    // 在这里就地显示出来。
+    if let Some(error) = hotkey_error.as_ref() {
+        page.push(
+            Element::from(
+                InfoBar::new(i18n.t("StatusTitleError"))
+                    .message(error.clone())
+                    .severity(InfoBarSeverity::Error)
+                    .is_closable(false),
+            )
+            .with_key("settings.hotkey_error"),
         );
     }
 
@@ -1388,7 +1288,7 @@ fn settings_page(
 ///
 /// 出问题时用户不用自己去翻应用数据目录。
 fn build_diagnostics_section(i18n: &app_core::i18n::I18n) -> Element {
-    let config_dir = crate::app_config_dir();
+    let config_dir = app_core::paths::app_config_dir();
     let log_dir = config_dir.join("logs");
     let version = crate::update::current_version();
 

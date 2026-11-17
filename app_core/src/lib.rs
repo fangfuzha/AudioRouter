@@ -3,6 +3,9 @@
 pub mod controller;
 pub mod hotkey;
 pub mod i18n;
+#[cfg(target_os = "windows")]
+pub mod ipc;
+pub mod paths;
 
 #[cfg(target_os = "windows")]
 pub mod autostart;

@@ -157,7 +157,18 @@ jobs:
             exit 1
           }
 
-      - name: Build winui3_gui (release)
+      # 缓存 WindowsAppRuntime 运行时包。
+      # 打包脚本会自己下载并校验运行时（约 159MB 的 nupkg），缓存一下省得每次重下。
+      # 缓存目录与上游 windows-reactor-setup 用的是同一个，已有的包直接复用。
+      - name: Cache WindowsAppRuntime runtime package
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\Users\runneradmin\AppData\Local\windows-reactor-setup\temp
+            C:\Users\runneradmin\AppData\Local\AudioRouter\cache
+          key: winappsdk-runtime-v1-${{ hashFiles('installer/runtime-version.txt') }}
+
+      - name: Build winui3_gui + audiorouter_service (release)
         env:
           # 仓库默认 profile 是 lto=true + codegen-units=1（fat LTO 单 codegen unit），
           # 链接阶段无法并行，是整个发布流程最大的耗时点。
@@ -165,7 +176,9 @@ jobs:
           # 链接时间显著下降，仓库默认 profile 保持不变，本地发版仍是 fat LTO。
           CARGO_PROFILE_RELEASE_LTO: thin
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
-        run: cargo build --locked --release --package winui3_gui
+        # 控制面板与常驻服务是两个进程，必须一起构建：两个 exe 要装在同一个目录里
+        # （服务靠同目录找到 GUI，面板靠同目录找到服务）。
+        run: cargo build --locked --release --package winui3_gui --package audiorouter_service
 
       # 合并 PFX 解码与 signtool 定位，只执行一次（有证书时）
       - name: Prepare code signing
@@ -196,13 +209,17 @@ jobs:
         run: |
           Write-Host "Signing exe"
           & $env:SIGNTOOL_PATH sign /v /fd SHA256 /a /tr http://timestamp.digicert.com /td SHA256 "target\release\winui3_gui.exe"
+          # 常驻服务 exe 同样要签名
+          & $env:SIGNTOOL_PATH sign /v /fd SHA256 /a /tr http://timestamp.digicert.com /td SHA256 "target\release\audiorouter_service.exe"
 
       - name: Build installer with Inno Setup
         shell: pwsh
         run: |
           Write-Host "Building installer for version $env:RELEASE_VERSION"
-          # 使用项目自带的打包脚本，跳过 cargo build（已在上一步完成）
-          & .\scripts\build-installer.ps1 -NoBuild -Version $env:RELEASE_VERSION
+          # 使用项目自带的打包脚本，跳过 cargo build（已在上一步完成）。
+          # 打包脚本会自己下载并校验 WindowsAppRuntime 运行时，任何一步失败都直接
+          # 退出，不会再产出"只装了一个 exe"的坏包。
+          & .\scripts\build-installer.ps1 -NoBuild -Version $env:RELEASE_VERSION -DeploymentMode self-contained
 
       - name: Sign installer (only if cert provided)
         if: ${{ env.WINDOWS_SIGN_CERT && env.WINDOWS_SIGN_PASSWORD }}
@@ -216,6 +233,36 @@ jobs:
           Write-Host "Signing installer: $($installer.FullName)"
           & $env:SIGNTOOL_PATH sign /v /fd SHA256 /a /tr http://timestamp.digicert.com /td SHA256 $installer.FullName
 
+      # 框架依赖变体：WinUI 改为引用系统上已安装的 WindowsAppRuntime 包，
+      # 安装包只有几 MB；没装运行时的机器首次启动会弹官方快速安装界面。
+      # 这里只做构建校验并作为 artifact 上传，不进 Release 资源。
+      - name: Build framework-dependent variant (verification)
+        shell: pwsh
+        env:
+          CARGO_PROFILE_RELEASE_LTO: thin
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+          # 框架依赖模式靠 build script 把 bootstrapper 拷到 target 目录，
+          # 这是 build script 的副作用，sccache 命中时不会发生 —— 所以这里关掉 sccache，
+          # 并用独立的 target 目录，避免覆盖自包含变体的产物。
+          RUSTC_WRAPPER: ""
+          CARGO_TARGET_DIR: "target\fd"
+        run: |
+          cargo build --locked --release --package winui3_gui --features winui3_gui/framework-dependent
+          cargo build --locked --release --package audiorouter_service
+
+      - name: Build framework-dependent installer (verification)
+        shell: pwsh
+        run: |
+          & .\scripts\build-installer.ps1 -NoBuild -Version $env:RELEASE_VERSION -DeploymentMode framework-dependent -CargoTargetDir "target\fd"
+
+      - name: Upload framework-dependent installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: audiorouter-framework-dependent-installer
+          path: installer/Output/AudioRouter-Setup-${{ env.RELEASE_VERSION }}-x64-fd.exe
+          if-no-files-found: error
+          retention-days: 7
+
       # 构建失败时上传日志和中间产物便于排查
       - name: Upload artifacts on failure
         if: failure()
@@ -224,6 +271,7 @@ jobs:
           name: build-logs-${{ env.RELEASE_TAG || 'untagged' }}
           path: |
             target/release/winui3_gui.exe
+            target/release/audiorouter_service.exe
             installer/Output/
           if-no-files-found: ignore
           retention-days: 7
@@ -231,7 +279,7 @@ jobs:
       - name: Verify installer
         shell: pwsh
         run: |
-          $installer = Get-ChildItem ".\installer\Output\AudioRouter-Setup-*.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $installer = Get-Item ".\installer\Output\AudioRouter-Setup-$($env:RELEASE_VERSION)-x64.exe"
           if (-not $installer) {
             Write-Error "Installer not found!"
             exit 1
@@ -262,7 +310,7 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           files: |
-            installer/Output/AudioRouter-Setup-*.exe
+            installer/Output/AudioRouter-Setup-${{ env.RELEASE_VERSION }}-x64.exe
           fail_on_unmatched_files: true
           generate_release_notes: true
           name: AudioRouter ${{ env.RELEASE_TAG }}

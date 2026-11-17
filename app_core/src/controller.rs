@@ -1,7 +1,8 @@
 //! 应用控制层，封装与具体 GUI 框架无关的状态和操作。
 
-use audio_core::com_service::device::{DeviceInfo, get_all_output_devices};
-use audio_core::router::{ChannelMode, Router, RouterConfig, RouterTarget};
+use crate::ipc::{Request, RouterEvent, ServiceClient, StateSnapshot};
+use audio_core::com_service::device::DeviceInfo;
+use audio_core::router::{ChannelMode, RouterConfig, RouterTarget};
 use config::ConfigManager;
 use config::config::{General, Output};
 
@@ -35,7 +36,7 @@ pub enum StartBlock {
 /// 应用业务状态和操作入口。
 pub struct AppController {
     pub config_manager: ConfigManager,
-    pub router: Router,
+    pub service: ServiceClient,
     pub i18n: I18n,
     pub devices: Vec<DeviceInfo>,
     pub selected_source: Option<String>,
@@ -43,18 +44,24 @@ pub struct AppController {
     pub status_text: String,
     /// `status_text` 的语义级别，供 GUI 上色。
     pub status_level: StatusLevel,
+    /// 全局热键注册失败时的提示（热键在常驻服务进程里注册）。
+    pub hotkey_error: Option<String>,
     pub draft_general: General,
     initialized: bool,
+    /// 已经处理过的路由事件序号，用来去重。
+    last_event_seq: u64,
+    /// 是否已经尝试过「开机自动路由」。
+    auto_route_checked: bool,
 }
 
 impl AppController {
-    pub fn new(config_manager: ConfigManager, router: Router) -> Self {
+    pub fn new(config_manager: ConfigManager, service: ServiceClient) -> Self {
         let cfg = config_manager.handle().read().clone();
         let locale = cfg.general.language.clone();
 
         Self {
             config_manager,
-            router,
+            service,
             i18n: I18n::new(&locale),
             devices: Vec::new(),
             selected_source: if cfg.source_device_id.is_empty() {
@@ -65,8 +72,11 @@ impl AppController {
             is_running: false,
             status_text: String::new(),
             status_level: StatusLevel::Idle,
+            hotkey_error: None,
             draft_general: cfg.general.clone(),
             initialized: false,
+            last_event_seq: 0,
+            auto_route_checked: false,
         }
     }
 
@@ -84,83 +94,78 @@ impl AppController {
             return;
         }
         self.initialized = true;
-        self.refresh_devices();
-        self.is_running = self.router.is_running();
-
-        if self.devices.is_empty() {
-            let text = self.i18n.t("NoDevices").to_string();
-            self.set_status(StatusLevel::Warning, text);
-        }
-
-        self.start_auto_route_if_enabled();
+        // 设备列表、运行状态都由常驻服务推送过来，这里先要一份最新状态。
+        let _ = self.service.send(&Request::State);
     }
 
-    pub fn refresh_devices(&mut self) {
-        match get_all_output_devices() {
-            Ok(devices) => {
-                if devices == self.devices {
-                    return;
-                }
+    /// 应用常驻服务推送的状态快照。
+    ///
+    /// 设备枚举、路由启停都在服务进程里完成，界面只负责呈现。
+    pub fn apply_service_state(&mut self, snapshot: StateSnapshot) {
+        let previous = std::mem::take(&mut self.devices);
+        let devices_changed = previous != snapshot.devices;
+        self.devices = snapshot.devices;
+        self.is_running = snapshot.running;
 
-                let previous = std::mem::take(&mut self.devices);
-                self.devices = devices;
-                if self.devices.is_empty() {
-                    let text = self.i18n.t("NoDevices").to_string();
-                    self.set_status(StatusLevel::Warning, text);
-                } else if !previous.is_empty() {
-                    // 设备热插拔导致的刷新：给用户一个明确反馈，
-                    // 否则「界面悄悄变了一下」很容易被忽略。
-                    let text = self.i18n.t("DevicesUpdated").to_string();
-                    self.set_status(StatusLevel::Idle, text);
-                } else if !self.is_running {
-                    let text = self.i18n.t("StatusReady").to_string();
-                    self.set_status(StatusLevel::Idle, text);
-                }
-                self.prune_invalid_selection();
-                self.apply_running_config();
+        if devices_changed {
+            if self.devices.is_empty() {
+                let text = self.i18n.t("NoDevices").to_string();
+                self.set_status(StatusLevel::Warning, text);
+            } else if !previous.is_empty() {
+                // 设备热插拔导致的刷新：给用户一个明确反馈，
+                // 否则「界面悄悄变了一下」很容易被忽略。
+                let text = self.i18n.t("DevicesUpdated").to_string();
+                self.set_status(StatusLevel::Idle, text);
+            } else if !self.is_running {
+                let text = self.i18n.t("StatusReady").to_string();
+                self.set_status(StatusLevel::Idle, text);
             }
-            Err(e) => {
-                log::error!("Failed to enumerate devices: {e}");
-                let text = self.i18n.t("ErrorLoadingDevices").to_string();
-                self.set_status(StatusLevel::Error, text);
-            }
-        }
-    }
-
-    /// 轮询路由 worker 事件，同步运行状态到 GUI。
-    /// 由后台事件线程在 worker 产生事件时触发。
-    pub fn poll_router_events(&mut self) {
-        use audio_core::router::WorkerEvent;
-
-        let events = self.router.poll_events();
-        if events.is_empty() {
-            return;
+            self.prune_invalid_selection();
         }
 
-        for ev in events {
-            match ev {
-                WorkerEvent::Started => {
-                    self.is_running = true;
+        // 路由事件带序号：同一个事件只在序号变化时处理一次，
+        // 避免把上一次的失败提示反复显示出来。
+        if snapshot.event_seq != self.last_event_seq {
+            self.last_event_seq = snapshot.event_seq;
+            match snapshot.router_event {
+                Some(RouterEvent::Started) => {
                     self.status_level = StatusLevel::Ok;
                 }
-                WorkerEvent::Restarting => {
+                Some(RouterEvent::Restarting) => {
                     let text = self.i18n.t("Restarting").to_string();
                     self.set_status(StatusLevel::Warning, text.clone());
                     log::info!("Router: {text}");
                 }
-                WorkerEvent::Restarted => {
-                    self.is_running = true;
+                Some(RouterEvent::Restarted) => {
                     let text = self.i18n.t("Restarted").to_string();
                     self.set_status(StatusLevel::Ok, text.clone());
                     log::info!("Router: {text}");
                 }
-                WorkerEvent::Failed(msg) => {
-                    self.is_running = false;
+                Some(RouterEvent::Failed) => {
+                    let msg = snapshot.message.clone().unwrap_or_default();
                     let text = self.i18n.t("RoutingFailed").replace("{error}", &msg);
                     self.set_status(StatusLevel::Error, text);
                     log::error!("Router failed: {msg}");
                 }
+                None => {}
             }
+        }
+
+        // 全局热键在服务进程里注册：被别的程序占用时把原因显示出来。
+        if let Some(err) = snapshot.hotkey_error.as_ref() {
+            log::warn!("全局热键注册失败: {err}");
+            let text = self.i18n.t("HotkeyInUse").to_string();
+            self.hotkey_error = Some(text.clone());
+            self.set_status(StatusLevel::Error, text);
+        } else {
+            self.hotkey_error = None;
+        }
+
+        // 第一次拿到状态时，如果配置里开了「开机自动路由」而服务还没开始，
+        // 补一次启动请求。
+        if !self.auto_route_checked {
+            self.auto_route_checked = true;
+            self.start_auto_route_if_enabled();
         }
     }
 
@@ -282,6 +287,8 @@ impl AppController {
     }
 
     pub fn start_routing(&mut self) {
+        // 先在本地校验配置，给出即时的错误反馈；真正的启动由服务执行，
+        // 它会按 settings.toml 里的配置重新读取一遍。
         let router_cfg = match self.build_router_config() {
             Some(cfg) => cfg,
             None => return,
@@ -290,9 +297,8 @@ impl AppController {
 
         let starting = self.i18n.t("Starting").to_string();
         self.set_status(StatusLevel::Idle, starting);
-        match self.router.start(router_cfg) {
+        match self.service.send(&Request::Start) {
             Ok(()) => {
-                self.is_running = true;
                 let text = self
                     .i18n
                     .t("RunningOn")
@@ -314,14 +320,13 @@ impl AppController {
     pub fn stop_routing(&mut self) {
         let stopping = self.i18n.t("Stopping").to_string();
         self.set_status(StatusLevel::Idle, stopping);
-        match self.router.stop() {
+        match self.service.send(&Request::Stop) {
             Ok(()) => {
                 self.is_running = false;
                 let text = self.i18n.t("StatusReady").to_string();
                 self.set_status(StatusLevel::Idle, text);
             }
             Err(e) => {
-                self.is_running = self.router.is_running();
                 let text = self
                     .i18n
                     .t("ErrorStopRouting")
@@ -360,6 +365,17 @@ impl AppController {
             self.set_status(StatusLevel::Error, text);
             log::error!("Set autostart failed: {e}");
             return Err(e.to_string());
+        }
+
+        // 热键的注册与注销由常驻服务负责：设置落盘后立刻通知它，
+        // 让新组合键立即生效（被占用时服务会把错误推回来）。
+        let hotkey = self.draft_general.global_hotkey.clone();
+        if let Err(e) = self.service.send(&Request::SetHotkey { value: hotkey }) {
+            log::error!("通知服务更新全局热键失败: {e}");
+        }
+        // 语言变了要刷新托盘菜单（托盘在服务进程里）。
+        if let Err(e) = self.service.send(&Request::RefreshTray) {
+            log::error!("通知服务刷新托盘失败: {e}");
         }
 
         if new_language != self.i18n.locale() {
@@ -503,68 +519,14 @@ impl AppController {
         if !self.is_running {
             return;
         }
-
-        // 在 stop 之前先 snapshot 当前路由配置,stop 失败时回滚到它
-        // (避免 stop 失败但 selected_source / channel_mode 已经被外部修改,
-        //  导致 UI 显示和实际路由不一致)。
-        let previous_source = self.selected_source.clone();
-        let previous_outputs: Vec<(String, bool, Option<String>)> = self
-            .config_manager
-            .handle()
-            .read()
-            .outputs
-            .iter()
-            .map(|o| (o.device_id.clone(), o.enabled, o.channel_mode.clone()))
-            .collect();
-
-        if let Err(e) = self.router.stop() {
-            self.is_running = self.router.is_running();
+        // 配置已经落盘，服务会按新配置把路由重启一遍（先停再起）。
+        if let Err(e) = self.service.send(&Request::Start) {
+            log::error!("Apply running config failed: {e}");
             let text = self
                 .i18n
                 .t("ErrorStopPrevious")
                 .replace("{error}", &e.to_string());
             self.set_status(StatusLevel::Error, text);
-            log::error!("Stop routing before applying config failed: {e}");
-
-            // 尽力回滚 selected_source 和 outputs 到 stop 之前的状态
-            self.selected_source = previous_source;
-            if let Err(rb_err) = self.config_manager.update(|cfg| {
-                cfg.source_device_id = self.selected_source.clone().unwrap_or_default();
-                cfg.outputs = previous_outputs
-                    .into_iter()
-                    .map(|(device_id, enabled, channel_mode)| Output {
-                        device_id,
-                        enabled,
-                        channel_mode,
-                    })
-                    .collect();
-            }) {
-                log::error!("Rollback config after stop failure failed: {rb_err}");
-            }
-            return;
-        }
-        self.is_running = false;
-
-        // stop 成功之后原来的路由已经不存在了。如果重启失败，必须明确告诉
-        // 用户「现在是停止状态」，否则界面看起来就像什么都没发生。
-        let was_running_count = self.enabled_output_ids().len();
-        let stopped_note = self
-            .i18n
-            .t("RoutingStopped")
-            .replace("{count}", &was_running_count.to_string());
-
-        if self.build_router_config().is_some() {
-            self.start_routing();
-            if !self.is_running {
-                let error = self.status_text.clone();
-                let text = self
-                    .i18n
-                    .t("RoutingStoppedAfterFailure")
-                    .replace("{error}", &error);
-                self.set_status(StatusLevel::Error, text);
-            }
-        } else {
-            self.set_status(StatusLevel::Warning, stopped_note);
         }
     }
 
@@ -579,37 +541,20 @@ impl AppController {
     }
 
     fn start_auto_route_if_enabled(&mut self) {
-        let cfg = self.config_manager.handle().read().clone();
+        if self.is_running {
+            return;
+        }
+        let handle = self.config_manager.handle();
+        let cfg = handle.read().clone();
         if !cfg.general.auto_route || cfg.source_device_id.is_empty() {
             return;
         }
-
-        let enabled_targets: Vec<RouterTarget> = cfg
-            .outputs
-            .iter()
-            .filter(|o| o.enabled)
-            .map(|o| RouterTarget {
-                device_id: o.device_id.clone(),
-                channel_mode: ChannelMode::from_config(o.channel_mode.as_deref()),
-            })
-            .collect();
-
-        if enabled_targets.is_empty() {
+        if !cfg.outputs.iter().any(|o| o.enabled) {
             return;
         }
-
-        let running_count = enabled_targets.len();
-        let router_cfg = RouterConfig {
-            source_device_id: Some(cfg.source_device_id.clone()),
-            targets: enabled_targets,
-        };
-        if self.router.start(router_cfg).is_ok() {
-            self.is_running = true;
-            let text = self
-                .i18n
-                .t("RunningOn")
-                .replace("{count}", &running_count.to_string());
-            self.set_status(StatusLevel::Ok, text);
+        // 真正启动由服务执行，它会自己读 settings.toml。
+        if let Err(e) = self.service.send(&Request::Start) {
+            log::error!("Auto route failed: {e}");
         }
     }
 }

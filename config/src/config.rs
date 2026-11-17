@@ -202,6 +202,27 @@ impl ConfigManager {
         }
     }
 
+    /// 只读取已存在的配置文件，不存在时返回 `None`。
+    ///
+    /// 服务进程用它读路由配置：如果配置文件还不存在就直接返回 None，
+    /// 而不是像 `load` 那样创建一个默认文件——否则服务先启动时会把
+    /// GUI 准备好的语言设置覆盖掉。
+    pub fn load_if_exists(basepath: Option<PathBuf>) -> Result<Option<Self>> {
+        let config_dir = basepath.unwrap_or_else(default_config_dir);
+        let config_path = config_dir.join("settings.toml");
+        if !config_path.exists() {
+            return Ok(None);
+        }
+        let s = fs::read_to_string(&config_path)
+            .with_context(|| format!("reading config file: {}", config_path.display()))?;
+        let cfg: Config = toml::from_str(&s).context("parsing TOML config")?;
+        cfg.validate()?;
+        Ok(Some(Self {
+            path: config_path,
+            inner: Arc::new(RwLock::new(cfg)),
+        }))
+    }
+
     /// Save current config to disk atomically.
     pub fn save(&self) -> Result<()> {
         let cfg = self.inner.read().clone();

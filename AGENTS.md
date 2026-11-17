@@ -1,7 +1,7 @@
 # AGENTS.md
 
 > Canonical agent guide for the `AudioRouter` workspace.
-> Last refreshed: 2026-08-21 (post CI fix + windows 0.62 alignment).
+> Last refreshed: 2026-11-20 (运行时打包修复 + 自包含/框架依赖双部署模式).
 
 ## Project Goal
 
@@ -20,11 +20,14 @@ Workspace members (`Cargo.toml`):
 |---------------|-----------------------------------------------------------------|-----------------------------------------------------|
 | `audio_core`  | WASAPI loopback capture + multi-render, device enum, hot-plug   | `config`, `windows 0.62`, `windows-core 0.62`       |
 | `config`      | Atomic `settings.toml` read/write + schema validation           | `serde`, `toml 1`                                   |
-| `app_core`    | `AppController`, i18n, autostart, window placement registry    | `audio_core`, `config`, `windows 0.62`              |
-| `winui3_gui`  | WinUI 3 frontend (windows-reactor), tray, single-instance, proxy | `app_core`, `audio_core`, `windows-reactor` (git)  |
+| `app_core`    | `AppController`, i18n, autostart, IPC protocol, window placement | `audio_core`, `config`, `windows 0.62`             |
+| `audiorouter_service` | 常驻服务：路由 + 托盘 + 全局热键（纯 Win32，不加载 App SDK） | `app_core`, `audio_core`, `config`             |
+| `winui3_gui`  | WinUI 3 控制面板 (windows-reactor)，单实例，代理，更新检查        | `app_core`, `audio_core`, `windows-reactor` (git)  |
 
-Dependency direction is one-way: `winui3_gui → app_core → audio_core → config`.
-Reverse edges are not allowed.
+Dependency direction is one-way: `winui3_gui → app_core → audio_core → config`
+and `audiorouter_service → app_core → audio_core → config`.
+Reverse edges are not allowed. The two binaries (`audiorouter_service.exe`,
+`winui3_gui.exe`) talk over a local named pipe, never by linking each other.
 
 Hot path: `router::worker::event_loop` reads from the loopback capture
 client and writes to N render clients on a 3ms timer; see
@@ -36,14 +39,150 @@ client and writes to N render clients on a 3ms timer; see
 - Device enumeration: `audio_core/src/com_service/{device,watcher}.rs`
 - Controller state machine: `app_core/src/controller.rs`
 - Config schema: `config/src/config.rs`
-- WinUI app entry: `winui3_gui/src/main.rs`
+- WinUI app entry (控制面板): `winui3_gui/src/main.rs`
 - Update + proxy hot-reload: `winui3_gui/src/update.rs`
-- Tray icon: `winui3_gui/src/tray.rs`
-- Background event sources (device hot-plug / router events / tray): `winui3_gui/src/events.rs`
-- Window placement + close-to-tray hooks: `winui3_gui/src/window_utils.rs`
+- 服务推送消息 → 控制器 → 重绘: `winui3_gui/src/events.rs`
+- Window placement + hotkey capture hooks: `winui3_gui/src/window_utils.rs`
+- 常驻服务入口: `audiorouter_service/src/main.rs`
+- 服务状态机 + 管道服务端: `audiorouter_service/src/service.rs`
+- 服务端托盘 + 全局热键 + 消息循环: `audiorouter_service/src/desktop.rs`
+- 拉起/激活控制面板: `audiorouter_service/src/launcher.rs`
+- IPC 协议 + 管道读写: `app_core/src/ipc.rs`
+- 共享路径解析（配置目录 / 资源）: `app_core/src/paths.rs`
 - Installer script: `scripts/build-installer.ps1`
+- Inno Setup 脚本: `installer/AudioRouter.iss`
+- 运行时文件白名单: `installer/runtime-files.txt`
+- 运行时版本: `installer/runtime-version.txt`
 
 For end-user docs see `README.md`; for short-term todos see `TODO.md`.
+
+## Current Status (2026-11-20，运行时打包修复 + 部署模式可切换)
+
+### v0.3.12~v0.3.16 坏包的根因与修法
+
+v0.3.12 之后的安装包只有 exe（3.86 MB），缺 28 个 WinAppSDK DLL / `.pri` /
+语言目录，干净机器全新安装是坏的：自包含模式的 `app.manifest` 要求这些
+DLL 就地在 exe 旁边，`.pri` 缺失则**窗口创建失败后静默退出**。
+
+根因是 `windows_reactor_setup::as_self_contained()` 的**文件系统副作用**：
+它把运行时拷到 `target/<profile>/`，而 sccache 命中时 build script 根本不
+执行，副作用就消失了；`cache-targets: false` 又让 `target/` 不被还原。
+上游的下载/拷贝失败还全是静默的（只 `println!`），于是 CI 一路绿灯地产出
+坏包。
+
+修法（`scripts/build-installer.ps1`）：
+
+- **打包脚本自己准备运行时**，不再依赖 build script 副作用：按
+  `installer/runtime-files.txt` 的白名单，从
+  `Microsoft.WindowsAppSDK.Runtime` 的 nupkg → MSIX 里抽取条目。
+- **清单逐条校验**：`required` 段的条目少一个就 `exit 1`，
+  `optional` 段（语言资源）缺失只给提示；另外 14 个关键文件
+  （DLL + `.pri`）再单独点名检查。
+- **缺依赖一律打包失败**，不会再产出"只装了一个 exe"的包。
+- nupkg 优先复用 `%LOCALAPPDATA%\windows-reactor-setup\temp`（上游下载到
+  同一个目录、文件名规则一致），CI 里再加一层 actions/cache。
+
+### 两种部署模式
+
+| 模式 | 开关 | 安装包内容 | 运行时来源 |
+|---|---|---|---|
+| 自包含（默认发布形态） | 默认 | exe + 27 DLL + 4 `.pri` + 86 语言目录 + `Microsoft.UI.Xaml/`（staging 约 62 MB，装包 16 MB） | 随包发布 |
+| 框架依赖 | `cargo build --features framework-dependent` | exe + `Microsoft.WindowsAppRuntime.Bootstrap.dll` + `resources.pri` | 系统上已安装的 WindowsAppRuntime 包；缺失时 bootstrapper 弹官方快速安装界面 |
+
+- 模式由 cargo feature `winui3_gui/framework-dependent` 决定：
+  `winui3_gui/build.rs` 读 `CARGO_FEATURE_FRAMEWORK_DEPENDENT` 切换
+  `as_framework_dependent()` / `as_self_contained()`；
+  `winui3_gui/src/main.rs` 在建任何 XAML 对象之前调
+  `windows_reactor::bootstrap()`。
+- **打包脚本会校验模式与 exe 实际形态一致**：自包含的 exe 内嵌了
+  `app.manifest`（含 `asmv3:file`），框架依赖的没有；不一致直接 `exit 1`。
+- 框架依赖模式的安装包只有几 MB，但**要求系统已装（或愿意装）Windows
+  App Runtime**，适合企业统一分发运行时的场景。
+
+### WindowsAppRuntime 版本
+
+- 版本号在 `installer/runtime-version.txt`，当前是 **2.3.1** —— 与上游
+  `windows-reactor-setup` 的 pin 一致，**不要单独抬版本**。
+- **为什么必须保持一致**：四样东西按同一个版本生成，缺一不可：
+  1. exe 内嵌的 `app.manifest`（上游 pin 里的 WinAppSDK 2.3.5 package fragment）；
+  2. Rust 侧 WinRT 绑定（`windows-reactor` 同一 pin 生成的元数据）；
+  3. `build.rs` 里 `as_self_contained()` 拷进 `target/<profile>/` 的运行时
+     （上游硬编码 `RUNTIME_VER = "2.3.1"`）；
+  4. 打包脚本抽取的运行时（`installer/runtime-version.txt`）。
+
+  只抬第 4 个，会让 `cargo run` 用的运行时和发给用户的运行时变成两套；
+  而且新版本独有的 WinRT 类既不在 manifest 里、也不在 Rust 绑定里，
+  调用会**静默失败** —— 要等哪天真用上新 API 才炸。
+- **升级的正确姿势（整套一起升）**：先升 `windows-rs` pin（绑定与
+  app.manifest 一起重新生成）→ 再改 `installer/runtime-version.txt` →
+  跑打包脚本验证。
+- 打包脚本有版本一致性护栏：从上游 crate 源码里读 `RUNTIME_VER`，与
+  `installer/runtime-version.txt` 不一致就打印警告（只警告不阻断）。
+- 查最新版本：flat container API
+  `https://api.nuget.org/v3-flatcontainer/microsoft.windowsappsdk.runtime/index.json`。
+- **换版本流程**：改 `installer/runtime-version.txt` → 跑打包脚本 →
+  脚本逐条校验清单。清单分两段：
+  - `required` 段（运行时 DLL / `.pri` / `Microsoft.UI.Xaml/`）**缺一个就
+    打包失败**；
+  - `optional` 段（语言资源目录）缺失只给提示，不同版本收录的语言不一样。
+- 已知事实：**2.6.5（nuget 上最新稳定版）实测能跑** —— 清单 118 个条目
+  全部命中，干净安装后主页与设置页都完整渲染（UIA：主页 44 个后代元素、
+  设置页 61 个），设备列表正常。但它是"错位可用"，**不是推荐状态**。
+- **框架依赖模式不用管版本**：bootstrapper 只负责"确保框架已安装"，
+  之后系统上的 `Microsoft.WindowsAppRuntime.2` 包由 Windows Update /
+  Store 自动更新到最新的 2.x（本机实测是 2.6.5.0）。
+
+## Current Status (2026-11-19，进程隔离：托盘/路由常驻，界面可退出)
+
+WinUI 3 的框架开销（~120 MB 工作集）是**进程级**的，窗口关掉也不会还回
+系统。因此把「干活的部分」和「界面」拆成两个进程：
+
+| 进程 | 职责 | 常驻内存（release 实测） |
+|---|---|---|
+| `audiorouter_service.exe` | 音频路由、设备热插拔、托盘图标、全局热键、命名管道服务端 | **WS 14.8 MB / 私有 2.3 MB** |
+| `winui3_gui.exe` | 控制面板（纯界面） | WS 117 MB / 私有 96 MB（开着才占） |
+
+关闭控制面板 → 面板进程退出（约 0.5s），那 ~96 MB 私有内存全部还给
+系统；托盘图标、路由、全局热键仍在服务进程里跑着，想用的时候从托盘
+或快捷键再把面板叫起来。
+
+### 关键设计
+
+- **服务不依赖 windows-reactor**，因此不加载 `Microsoft.ui.xaml.dll`，
+  也不会把 D3D 合成器拖进来。托盘与热键跑在服务自己创建的隐藏窗口
+  （`AudioRouterServiceWindow`）上，由服务自己的 `GetMessageW` 循环
+  派发消息（`tray-icon` 只建窗口、不跑消息循环）。
+- **IPC 用本地命名管道** `\\.\pipe\AudioRouter-Service-v1`，自研分帧：
+  4 字节小端长度 + UTF-8 JSON（`serde_json`）。不用 TCP 端口，也不引入
+  第三方 named-pipe crate。
+- **服务是 `settings.toml` 的只读方，GUI 是唯一写入方。** 服务用
+  `ConfigManager::load_if_exists()` 读配置：文件不存在就返回 `None`，
+  绝不抢先创建默认配置（否则会把 GUI 准备好的语言覆盖掉）。
+- **路由配置由服务自己从 `settings.toml` 构建**（`build_router_config()`），
+  GUI 只发 Start/Stop 意图，保证「先落盘再重启」的顺序。
+- **状态推送用 `event_seq` 单调序号去重**，避免重复显示上一次的失败提示。
+- **`close_to_tray` 的语义变了**：现在是「关闭面板后常驻服务是否继续运行」
+  （true = 服务继续，默认值不变，旧 `settings.toml` 不用改；false = 服务
+  一起退出）。面板的关闭按钮与 Ctrl+W 都直接退出面板进程。
+- **开机自启指向 `audiorouter_service.exe`**（`app_core::autostart` 的
+  `autostart_target()`）：开机只需要路由和托盘常驻，面板用不到。
+- **面板从托盘被叫起来时带 `--show`**：配置里的「启动时最小化」在这种
+  场景下不适用，用户是明确点了图标才叫面板的。
+
+### 踩过的坑：命名管道上不能留挂起的阻塞读
+
+最初服务端用「读线程 + 主循环写」的模型，结果两边互等、整个服务卡死：
+Windows 对同一个 file object 的**同步 I/O 会串行化**——读线程挂着阻塞
+`ReadFile` 时，主循环往同一条管道 `WriteFile` 会一直等那次读返回；而读
+又在等客户端的下一帧，双方互等，**死锁**。表现是「命令要等下一条命令
+才生效」（启动路由被延迟十几秒）。
+
+解决办法（`app_core/src/ipc.rs`）：**读之前先 `PeekNamedPipe` 看有没有
+数据，有才读**，任何时刻都不留挂起的读操作。偷看长度前缀（不消费）还能
+判断整帧是否到齐，避免「读了长度、负载没到」把帧拆散。代价是几毫秒的
+轮询延迟。
+
+写操作仍然是阻塞写：客户端那边一直在读，管道缓冲（64 KB）不会被填满。
 
 ## Current Status (2026-11-18，内存占用优化)
 
@@ -235,6 +374,16 @@ Refactor pass complete. Key changes:
 
 ## Non-Obvious Invariants
 
+- **安装包的运行时文件绝不从 `target/` 拿。** `target/<profile>/` 里的
+  WinAppSDK DLL 是 build script 的副作用，sccache 命中时根本不存在 ——
+  打包脚本必须从 nupkg/MSIX 按 `installer/runtime-files.txt` 重新抽取，
+  并逐条校验。
+- **ISPP 的 `#if` 里 `==` 只能比较字符串**，拿宏和数字比会报
+  "Operator not applicable to this operand type"。部署模式改用
+  "staging 里有没有 bootstrapper" 这种文件存在性判断。
+- **build script 里读 feature 要用 `CARGO_FEATURE_*` 环境变量**：
+  `#[cfg(feature = "...")]` 在 `build.rs` 里不生效（build script 是独立的
+  crate，拿不到本包的 feature）。
 - **`#[implement]` macro wrapper name** (windows 0.62+): the macro
   generates a `<OriginalName>_Impl` newtype. Manual `impl <Trait>_Impl`
   blocks must target the wrapper, **not** the original name. See
@@ -385,6 +534,26 @@ Refactor pass complete. Key changes:
   （48kHz / 32bit / 2ch EXTENSIBLE），此时只传格式、不传转换标志即可走
   直通路径。比对逻辑在 `audio_core::com_service::router::formats_equivalent`；
   直通被设备拒绝时会自动回退到带转换的写法（invalidated 不回退）。
+- **命名管道上不能留挂起的阻塞读。** Windows 对同一个 file object 的同步
+  I/O 会串行化：读线程挂着阻塞 `ReadFile` 时，另一个线程往同一条管道
+  `WriteFile` 会一直等那次读返回。服务端「读线程 + 主循环写」的模型会
+  因此死锁（命令要等下一条命令才生效）。`app_core::ipc.rs` 的读法是
+  「先 `PeekNamedPipe` 看有没有数据，有才读」，任何时刻都不留挂起读。
+  新增读路径时务必照做，别图省事改回阻塞读。
+- **服务进程只读 `settings.toml`，GUI 是唯一写入方。** 服务用
+  `ConfigManager::load_if_exists()`：文件不存在时返回 `None`，绝不创建
+  默认配置——否则服务先启动会把 GUI 准备好的系统语言覆盖掉。
+  服务要改配置时，只能通过面板下发的命令（Start/Stop/SetHotkey）。
+- **两个 exe 必须同目录。** 服务靠 `sibling_exe(GUI_EXE_NAME)` 找面板，
+  面板靠 `sibling_exe(SERVICE_EXE_NAME)` 找服务（`app_core::ipc`）。
+  安装脚本会把 `target/release` 下的全部 exe 打进 staging 目录。
+- **关窗口 = 面板进程退出。** `window_utils` 不再拦截 `WM_CLOSE`（原来
+  是 `ShowWindow(SW_HIDE)` 隐藏到托盘），`app.run()` 返回后主进程退出，
+  WinUI 的 ~96 MB 私有内存随之释放。`close_to_tray` 现在表示「关闭面板
+  后常驻服务是否继续运行」，不是「窗口是否隐藏到托盘」。
+- **服务进程不要引入 windows-reactor。** 它一进来就会加载
+  `Microsoft.ui.xaml.dll` 与 D3D 合成器，~120 MB 常驻内存就白费了——
+  拆进程的全部意义就在于让这部分内存跟着面板进程一起退出。
 - **内存占用基线（2026-11 实测，release 构建，WinUI 3 自包含部署）。**
   空闲态约 123 MB 工作集 / 105 MB 私有字节，其中绝大部分是 Windows App
   SDK（`Microsoft.ui.xaml.dll` 14 MB + `Microsoft.UI.Xaml.Controls.dll`
@@ -405,6 +574,12 @@ pushing a `v*` tag and uploads an Inno Setup installer to a GitHub Release.
 4. `git tag v<version> && git push origin v<version>` → the release workflow
    builds `cargo build --locked --release`, so `Cargo.lock` must be
    committed and consistent with the manifests.
+   发布产物是**自包含**安装包：workflow 先编两个二进制，再由
+   `scripts/build-installer.ps1` 自己下载并校验 WindowsAppRuntime 运行时
+   （nupkg 有 actions/cache），最后用 Inno Setup 打包。运行时缺任何一个
+   文件都会让打包步骤失败，不会再发出"只有 exe"的坏包。
+   workflow 还会额外构建一遍框架依赖变体并作为 artifact 上传（不进
+   Release 资源），保证这条路径在 CI 里持续被验证。
 5. tag 推送触发的发布失败时，不必删 tag 重来：修好 workflow 后用
    `gh workflow run release-windows.yml -f tag=v<version>` 手动重跑即可。
    手动触发用的是 **main 分支上的 workflow 文件**，但构建内容仍然取自
@@ -460,8 +635,10 @@ Run from `D:\my_project\AudioRouter`:
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --lib
-cargo build -p winui3_gui                  # debug
+cargo build -p audiorouter_service         # debug：常驻服务（必须与 GUI 同目录）
+cargo build -p winui3_gui                  # debug：控制面板
 cargo build --release -p winui3_gui        # release
+cargo build --release -p audiorouter_service   # release：常驻服务
 ```
 
 CI 在 `windows-latest` 上跑 `cargo fmt` + `cargo clippy`（`lint` job）
@@ -473,8 +650,19 @@ CI 不再单独跑 `cargo check`：`cargo clippy --all-targets` 已经覆盖同�
 To produce an installer:
 
 ```powershell
+# 自包含（默认发布形态）：脚本自己下载并校验 WindowsAppRuntime 运行时
 .\scripts\build-installer.ps1 -Version 0.4.0
+
+# 框架依赖变体：exe 必须用 framework-dependent 特性编译
+$env:CARGO_TARGET_DIR = "target\fd"
+cargo build --release -p winui3_gui --features winui3_gui/framework-dependent
+cargo build --release -p audiorouter_service
+.\scripts\build-installer.ps1 -NoBuild -Version 0.4.0 -DeploymentMode framework-dependent -CargoTargetDir "target\fd"
 ```
+
+打包脚本会校验"指定的部署模式"与"exe 实际形态"一致，不一致直接失败；
+再校验运行时清单逐条命中、14 个关键文件在位。任何一项不过都 `exit 1`，
+不会产出坏包。
 
 ## Conventions
 

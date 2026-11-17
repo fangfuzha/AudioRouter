@@ -1,0 +1,148 @@
+# AudioRouter 自包含部署的 WindowsAppRuntime 运行时文件清单
+#
+# 来源：windows-rs 仓库 crates/libs/reactor-setup/assets/runtime.txt
+#       @ a48e42ebe507985f2f474c4007fe8db2141371a4
+#       （即上游 windows-reactor-setup 内置的运行时清单）
+# 用途：scripts/build-installer.ps1 从 Microsoft.WindowsAppSDK.Runtime 的
+#       nupkg -> MSIX 里按本清单抽取文件，组装安装包的 staging 目录。
+#
+# 规则：
+# - 以 # 开头的行是注释，忽略；
+# - "=== xxx ===" 是分段标记，决定该段条目是必需还是可选；
+# - 每行一个条目，与 MSIX 内的顶层名称比对时忽略大小写
+#   （MSIX 里是 af-ZA / ca-Es-VALENCIA 这类混合大小写，清单统一写小写）；
+# - 条目是文件还是目录由 MSIX 里的实际形态决定，不用名字带不带点去猜
+#   （Microsoft.UI.Xaml 本身就带点）。
+#
+# required 段：必需。缺任何一个都直接打包失败 —— 自包含模式下少一个 DLL
+#   或 .pri 就会「窗口创建失败后静默退出」。
+# optional 段：可选。缺了只是少了该语言的界面文案，不阻断打包
+#   （不同 WindowsAppRuntime 版本收录的语言不完全一样）。
+#
+# 换运行时版本时：
+#   1. 改 installer/runtime-version.txt 里的版本号；
+#   2. 跑 scripts/build-installer.ps1，脚本会校验 required 段逐条命中，
+#      optional 段缺失只给提示；绝不会产出"装完缺关键文件"的坏包；
+#   3. 若新版本增删了必需文件，按报错提示同步更新本清单。
+
+=== required ===
+coremessagingxp.dll
+dcompi.dll
+dwmcorei.dll
+dwmscenei.dll
+dwritecore.dll
+marshal.dll
+microsoft.directmanipulation.dll
+microsoft.graphics.imaging.dll
+microsoft.inputstatemanager.dll
+microsoft.internal.frameworkudk.dll
+microsoft.ui.composition.ossupport.dll
+microsoft.ui.dll
+microsoft.ui.input.dll
+microsoft.ui.pri
+microsoft.ui.windowing.core.dll
+microsoft.ui.windowing.dll
+microsoft.ui.xaml.controls.dll
+microsoft.ui.xaml.controls.pri
+microsoft.ui.xaml
+microsoft.ui.xaml.dll
+microsoft.ui.xaml.internal.dll
+microsoft.ui.xaml.phone.dll
+microsoft.ui.xaml.resources.19h1.dll
+microsoft.ui.xaml.resources.common.dll
+microsoft.windows.applicationmodel.resources.dll
+microsoft.windowsappruntime.dll
+microsoft.windowsappruntime.pri
+mrm.dll
+resources.pri
+sessionhandleipcproxystub.dll
+winuiedit.dll
+wuceffectsi.dll
+
+=== optional ===
+af-za
+am-et
+ar-sa
+as-in
+az-latn-az
+bg-bg
+bn-in
+bs-latn-ba
+ca-es
+ca-es-valencia
+cs-cz
+cy-gb
+da-dk
+de-de
+el-gr
+en-gb
+en-us
+es-es
+es-mx
+et-ee
+eu-es
+fa-ir
+fi-fi
+fil-ph
+fr-ca
+fr-fr
+ga-ie
+gd-gb
+gl-es
+gu-in
+he-il
+hi-in
+hr-hr
+hu-hu
+hy-am
+id-id
+is-is
+it-it
+ja-jp
+ka-ge
+kk-kz
+km-kh
+kn-in
+ko-kr
+kok-in
+lb-lu
+lo-la
+lt-lt
+lv-lv
+mi-nz
+mk-mk
+ml-in
+mr-in
+ms-my
+mt-mt
+nb-no
+ne-np
+nl-nl
+nn-no
+or-in
+pa-in
+pl-pl
+pt-br
+pt-pt
+quz-pe
+ro-ro
+ru-ru
+sk-sk
+sl-si
+sq-al
+sr-cyrl-ba
+sr-cyrl-rs
+sr-latn-rs
+sv-se
+ta-in
+te-in
+th-th
+tr-tr
+tt-ru
+ug-cn
+uk-ua
+ur-pk
+uz-latn-uz
+vi-vn
+zh-cn
+zh-tw

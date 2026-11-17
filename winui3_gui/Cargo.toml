@@ -1,8 +1,16 @@
 [package]
 name = "winui3_gui"
-version = "0.3.16"
+version = "0.3.17"
 edition = "2021"
 rust-version = "1.95"
+
+[features]
+default = []
+# 框架依赖部署：WinUI 不再把 WindowsAppRuntime 运行时随包发布，
+# 改为引用系统上已安装的 WindowsAppRuntime 包；没装时启动会弹官方
+# 快速安装界面（由 windows_reactor::bootstrap() 触发）。
+# 打包时用 scripts\build-installer.ps1 -DeploymentMode framework-dependent。
+framework-dependent = []
 
 [dependencies]
 app_core = { path = "../app_core" }
@@ -20,8 +28,6 @@ log = "0.4"
 env_logger = "0.11"
 anyhow = "1"
 dark-light = "3"
-tray-icon = { version = "0.26", default-features = false }
-image = { version = "0.25", default-features = false, features = ["png"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
