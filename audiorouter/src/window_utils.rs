@@ -12,12 +12,13 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CallWindowProcW, DefWindowProcW, EnumWindows, FlashWindowEx,
     GetForegroundWindow, GetSystemMetrics, GetWindowLongPtrW, GetWindowPlacement, GetWindowTextW,
-    GetWindowThreadProcessId, IsWindow, IsWindowVisible, PostMessageW, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx,
-    FLASHWINFO, FLASHW_ALL, GWLP_WNDPROC, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
-    SW_HIDE, SW_MAXIMIZE, SW_SHOW, WH_KEYBOARD_LL, WINDOWPLACEMENT, WM_APP, WM_CLOSE,
-    WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYUP, WM_NCDESTROY, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, PostMessageW,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow,
+    UnhookWindowsHookEx, FLASHWINFO, FLASHW_ALL, GWLP_WNDPROC, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT,
+    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE,
+    SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_RESTORE, SW_SHOW, WH_KEYBOARD_LL, WINDOWPLACEMENT,
+    WM_APP, WM_CLOSE, WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYUP, WM_NCDESTROY, WM_SYSCOMMAND,
+    WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 /// `SC_KEYMENU`：Alt（或 F10）触发的系统菜单命令。
@@ -238,8 +239,7 @@ unsafe extern "system" fn subclass_wndproc(
         // 显示 / 隐藏必须回到窗口所属的线程上做，所以托盘线程只投递消息，
         // 真正的动作在 UI 线程的窗口过程里执行。
         if msg == WM_APP_SHOW {
-            ShowWindow(hwnd, SW_SHOW);
-            let _ = SetForegroundWindow(hwnd);
+            show_window_handle(hwnd);
             return 0;
         }
         if msg == WM_APP_HIDE {
@@ -444,6 +444,25 @@ fn request_visibility(visible: bool) {
     }
 }
 
+/// 显示窗口，并把它带到前台。
+///
+/// 窗口处于最小化状态时**必须**用 `SW_RESTORE`，用 `SW_SHOW` 是没用的：
+/// `SW_SHOW` 的语义是「按当前大小和位置显示并激活」，而对最小化的窗口来说
+/// 「当前状态」就是最小化，调用之后 `IsIconic` 依然为真——窗口根本不会回到
+/// 屏幕。这正是「窗口最小化后点托盘图标没反应」的根因（实测：最小化的窗口
+/// `ShowWindow(SW_SHOW)` 之后 `IsIconic` 仍为 `true`，只有
+/// `ShowWindow(SW_RESTORE)` 才会变成 `false`）。
+///
+/// `SW_RESTORE` 会还原到最小化**之前**的状态（普通尺寸或最大化），
+/// 所以本来就最大化的窗口不会被误还原成普通窗口。
+fn show_window_handle(hwnd: HWND) {
+    unsafe {
+        let minimized = IsIconic(hwnd) != 0;
+        ShowWindow(hwnd, if minimized { SW_RESTORE } else { SW_SHOW });
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
+
 /// 窗口就绪后按期望状态显示或隐藏（UI 线程）。
 fn apply_desired_visibility(hwnd: HWND) {
     let want = WANT_VISIBLE.load(Ordering::SeqCst);
@@ -451,10 +470,10 @@ fn apply_desired_visibility(hwnd: HWND) {
     if want == visible {
         return;
     }
-    unsafe {
-        if want {
-            ShowWindow(hwnd, SW_SHOW);
-        } else {
+    if want {
+        show_window_handle(hwnd);
+    } else {
+        unsafe {
             ShowWindow(hwnd, SW_HIDE);
         }
     }
@@ -861,6 +880,70 @@ mod tests {
 
         registry.forget(hwnd);
         assert_eq!(registry.lookup(hwnd), None);
+    }
+
+    /// 最小化的窗口必须能被「显示」操作还原到屏幕。
+    ///
+    /// 回归用例：托盘「显示」以前用的是 `SW_SHOW`，而 `SW_SHOW` 对最小化的
+    /// 窗口无效（`IsIconic` 仍然为真，窗口不会回到屏幕）——这就是「窗口最小化
+    /// 后点托盘图标没反应」的根因。现在统一走 `show_window_handle`：最小化时
+    /// 改用 `SW_RESTORE`。
+    #[test]
+    fn show_window_handle_restores_minimized_window() {
+        use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, RegisterClassW, SW_MINIMIZE, WNDCLASSW,
+            WS_OVERLAPPEDWINDOW,
+        };
+
+        unsafe extern "system" fn test_wndproc(
+            hwnd: HWND,
+            msg: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+        ) -> LRESULT {
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+
+        unsafe {
+            let class_name: Vec<u16> = "AudioRouterRestoreTest\0".encode_utf16().collect();
+            let instance = GetModuleHandleW(std::ptr::null());
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(test_wndproc),
+                hInstance: instance,
+                lpszClassName: class_name.as_ptr(),
+                ..std::mem::zeroed()
+            };
+            // 重复注册会失败，这里只关心第一次。
+            RegisterClassW(&wc);
+
+            let hwnd = CreateWindowExW(
+                0,
+                class_name.as_ptr(),
+                std::ptr::null(),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                200,
+                100,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                instance,
+                std::ptr::null_mut(),
+            );
+            assert!(!hwnd.is_null(), "创建测试窗口失败");
+
+            // 第一次 ShowWindow 会采用 STARTUPINFO 里的初始显示状态，参数被忽略；
+            // 从第二次起参数才生效，所以先无意义地调用一次。
+            ShowWindow(hwnd, SW_SHOW);
+            ShowWindow(hwnd, SW_MINIMIZE);
+            assert_ne!(IsIconic(hwnd), 0, "窗口应当处于最小化状态");
+
+            show_window_handle(hwnd);
+            assert_eq!(IsIconic(hwnd), 0, "显示操作应当把最小化的窗口还原");
+
+            DestroyWindow(hwnd);
+        }
     }
 
     /// 不同窗口各自记着自己的原始窗口过程，互不干扰。
