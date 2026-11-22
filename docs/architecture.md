@@ -3,6 +3,47 @@
 > 对应 AGENTS.md 的 `Architecture Map` 与 `Current Status (2026-11-18)`。
 > 原则性的约束见 [invariants.md](invariants.md)。
 
+## 全局视图
+
+```
+   ┌──────────────────────────────────────────────────┐
+   │  audiorouter.exe（单进程 · 多线程）               │
+   ├──────────────────────────────────────────────────┤
+   │ 主线程   托盘图标 / 全局热键 / Win32 消息循环      │
+   │    │ 命令总线 (app_core::bus::Command)            │
+   │    ▼                                             │
+   │ 服务线程  路由启停 / 设备枚举 / 状态汇总           │
+   │    │                                             │
+   │ UI 线程    WinUI 3 控制面板（按需创建，STA）       │
+   │    │                                             │
+   │    ▼ 共享 Arc<Mutex<AppController>>               │
+   │ ┌────────────────────────┐  ┌──────────────────┐ │
+   │ │       app_core         │  │    audio_core    │ │
+   │ │ Controller / I18n /    │  │ WASAPI 路由引擎  │ │
+   │ │ 自动启动 / 命令总线    │  │ 设备枚举 / 热插拔 │ │
+   │ └───────────┬────────────┘  └──────────────────┘ │
+   │             ▼                                     │
+   │        ┌─────────┐                                │
+   │        │  config │  settings.toml（原子写入）     │
+   │        └─────────┘                                │
+   └──────────────────────────────────────────────────┘
+```
+
+crate 分工：
+
+- **audio_core** — 纯音频库。`router` 负责 WASAPI loopback 捕获 + 多端渲染
+  （共享模式，SRC 自动转换），支持设备 invalidated 自动重启 + 指数退避重试。
+  `com_service::device` 提供设备枚举 / 热插拔通知（`DeviceWatcher`）。
+- **app_core** — Controller 把界面调用翻译成 `Router.start / stop`，管理
+  `ConfigManager`，处理 i18n、自动启动、GitHub Release 更新检查与下载。
+  `bus` 是进程内命令总线，取代了旧的跨进程命名管道。
+- **config** — `settings.toml` 原子写入（临时文件 + rename），启动时 schema
+  校验（版本号 + outputs 唯一性）。UI 线程与服务线程共享同一个
+  `ConfigManager`。
+- **audiorouter** — 唯一入口。主线程跑托盘与热键，服务线程跑路由，UI 线程跑
+  WinUI 3 界面（windows-reactor 反应式组件）。单例 / 代理热加载 / 更新检查等
+  平台行为在这一层。
+
 ## 线程分工
 
 以前这个应用是**两个 exe**：`audiorouter_service.exe`（路由 + 托盘 + 热键）

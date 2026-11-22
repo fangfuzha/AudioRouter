@@ -1,7 +1,7 @@
 # AGENTS.md
 
 > Canonical agent guide for the `AudioRouter` workspace.
-> Last refreshed: 2026-11-18 (最小化窗口还原修复 + 文档拆分到 `docs/`).
+> Last refreshed: 2026-11-22 (README 收敛为用户文档 + docs 建立开发索引).
 >
 > 本文件只保留**入口信息、核心不变量速查与文档索引**；具体的历史记录、
 > 平台坑、流程细节都按主题拆到 `docs/` 下的分文件里。
@@ -58,7 +58,8 @@ client and writes to N render clients on a 3ms timer; see
 - 运行时文件白名单: `installer/runtime-files.txt`
 - 运行时版本: `installer/runtime-version.txt`
 
-For end-user docs see `README.md`; for short-term todos see `TODO.md`.
+面向终端用户的说明见 [README.md](README.md)；开发者文档索引见
+[开发索引](#开发索引)；短期待办见 [TODO.md](TODO.md)。
 
 ## 核心不变量（速查）
 
@@ -119,13 +120,18 @@ CI 不再单独跑 `cargo check`：`cargo clippy --all-targets` 已经覆盖同�
   expected on `windows-reactor` components — annotate locally with
   `#[allow(...)]` rather than disabling at crate level.
 
-## 文档索引（docs）
+## 开发索引
+
+面向终端用户的内容在 [README.md](README.md)（功能、安装、使用、FAQ）——
+**改动 README 前先确认那段是不是用户关心的**；构建、架构、打包、CI 这类
+开发者内容一律留在 `docs/` 下。
 
 | 文件 | 内容 |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | 单进程多线程架构、进程内命令总线、窗口生命周期（按需创建 / 关闭到托盘 / 单实例唤醒）、事件驱动重绘、命名管道历史教训 |
+| [docs/development.md](docs/development.md) | **开发者入口**：环境要求、快速开始、项目结构、开发工作流、调试技巧、平台差异、贡献指南 |
+| [docs/architecture.md](docs/architecture.md) | 全局视图与 crate 分工、单进程多线程架构、进程内命令总线、窗口生命周期（按需创建 / 关闭到托盘 / 单实例唤醒）、事件驱动重绘、命名管道历史教训 |
 | [docs/invariants.md](docs/invariants.md) | 全部「非显然约束」：构建与打包、`windows` crate API、WinUI/reactor、线程与窗口、音频、脚本与 CI |
-| [docs/packaging.md](docs/packaging.md) | 坏包根因与修法、自包含 / 框架依赖两种部署模式、WindowsAppRuntime 版本钉死、打包脚本用法 |
+| [docs/packaging.md](docs/packaging.md) | 坏包根因与修法、自包含 / 框架依赖两种部署模式与两条独立的更新路径、WindowsAppRuntime 版本钉死、打包脚本用法 |
 | [docs/ui-winui.md](docs/ui-winui.md) | WinUI 3 界面的设计现状与改动记录：侧边栏、主页、设置页、托盘、首次启动语言、子类化崩溃 |
 | [docs/audio.md](docs/audio.md) | WASAPI 缓冲单位与直通路径、热路径分配、内存占用基线 |
 | [docs/release.md](docs/release.md) | 发版流程、CI 工作流与编译缓存、更新检查的镜像回退 |

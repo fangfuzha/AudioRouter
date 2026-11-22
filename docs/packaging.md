@@ -99,6 +99,21 @@ DLL 就地在 exe 旁边，`.pri` 缺失则**窗口创建失败后静默退出**
   之后系统上的 `Microsoft.WindowsAppRuntime.2` 包由 Windows Update /
   Store 自动更新到最新的 2.x（本机实测是 2.6.5.0）。
 
+## 前置条件
+
+- 安装 [Inno Setup 6](https://jrsoftware.org/isdl.php)（推荐），或设置环境变量
+  `ISCC_PATH` 指向 `ISCC.exe` 的完整路径。
+- 打包时会自动下载 Windows App Runtime 的 nupkg（约 160 MB）并校验，
+  **无需手动准备运行时**。
+
+## 安装包特性
+
+- 自包含部署：目标电脑无需安装 Windows App SDK 运行时
+- 开始菜单快捷方式
+- 可选桌面快捷方式
+- 一键卸载（控制面板 / 设置中）
+- 支持中文 / 英文双语安装向导
+
 ## 打包命令
 
 ```powershell
