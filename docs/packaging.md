@@ -48,6 +48,24 @@ DLL 就地在 exe 旁边，`.pri` 缺失则**窗口创建失败后静默退出**
 - 框架依赖模式的安装包只有几 MB，但**要求系统已装（或愿意装）Windows
   App Runtime**，适合企业统一分发运行时的场景。
 
+### 两条独立的更新路径
+
+自动更新按**当前构建的部署模式**选包，两个变体各走各的：
+
+| 当前实例 | 检查更新时认的资产 | 结果 |
+|---|---|---|
+| 自包含（默认） | `AudioRouter-Setup-<ver>-x64.exe` | 升级后仍是自包含 |
+| 框架依赖（`--features audiorouter/framework-dependent`） | `AudioRouter-Setup-<ver>-x64-fd.exe` | 升级后仍是框架依赖 |
+
+- 模式在编译期由 cargo feature 决定（`audiorouter/src/update.rs` 的
+  `deployment_mode()`），运行期不需要额外配置。
+- 匹配先按「前缀 + 版本号 + 模式后缀」精确命中，命中不了再按后缀兜底；
+  **别的模式的资产一律不认** —— 框架依赖的机器不会因为 release 里只有
+  自包含包就装错形态，缺自己那条线的包时报错而不是静默换包。
+- 注意：两个变体目前共用同一条 release tag（版本号相同），独立的是
+  **安装包**。若将来要让两条线有各自的版本号，需要给框架依赖包单独的
+  tag 前缀（例如 `fd-v1.2.3`）并相应改 `check_for_updates` 的取版本逻辑。
+
 ## WindowsAppRuntime 版本
 
 - 版本号在 `installer/runtime-version.txt`，当前是 **2.3.1** —— 与上游

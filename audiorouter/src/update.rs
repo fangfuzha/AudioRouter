@@ -2,7 +2,9 @@
 //!
 //! - 检测：GET https://api.github.com/repos/{owner}/{repo}/releases/latest
 //! - 对比：semver 比较当前版本与最新版 tag（去掉前缀 v）
-//! - 下载：从 release assets 中匹配 AudioRouter-Setup-*-x64.exe
+//! - 下载：从 release assets 中匹配**当前部署模式**的安装包
+//!   （自包含 `AudioRouter-Setup-<ver>-x64.exe`，
+//!   框架依赖 `AudioRouter-Setup-<ver>-x64-fd.exe`）
 //! - 安装：下载到临时目录后启动安装包并退出当前进程
 
 use std::path::PathBuf;
@@ -13,7 +15,47 @@ use semver::Version;
 const GITHUB_OWNER: &str = "fangfuzha";
 const GITHUB_REPO: &str = "AudioRouter";
 const USER_AGENT: &str = "AudioRouter-Updater";
+/// 安装包文件名前缀（两个部署模式共用）。
 const INSTALLER_PATTERN: &str = "AudioRouter-Setup-";
+/// 自包含安装包的文件名后缀。
+const SELF_CONTAINED_SUFFIX: &str = "-x64.exe";
+/// 框架依赖安装包的文件名后缀。
+const FRAMEWORK_DEPENDENT_SUFFIX: &str = "-x64-fd.exe";
+
+/// 部署模式：自包含 与 框架依赖。
+///
+/// 这两条线是**互相独立的更新路径**：每个变体更新时只认自己那条线的
+/// 安装包，不会把自包含的机器换成框架依赖（或反过来），也不会因为
+/// 另一个变体缺资产而检查失败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeploymentMode {
+    /// 自包含：WindowsAppRuntime 运行时 DLL 随安装包发布（默认发布形态）。
+    SelfContained,
+    /// 框架依赖：运行时用系统上已安装的 WindowsAppRuntime 包。
+    FrameworkDependent,
+}
+
+impl DeploymentMode {
+    /// 该模式对应的安装包文件名后缀。
+    pub fn installer_suffix(self) -> &'static str {
+        match self {
+            DeploymentMode::SelfContained => SELF_CONTAINED_SUFFIX,
+            DeploymentMode::FrameworkDependent => FRAMEWORK_DEPENDENT_SUFFIX,
+        }
+    }
+}
+
+/// 当前运行的实例属于哪种部署模式。
+///
+/// 由编译期的 cargo feature `audiorouter/framework-dependent` 决定：
+/// 带这个 feature 编出来的是框架依赖变体，否则是自包含变体。
+pub fn deployment_mode() -> DeploymentMode {
+    if cfg!(feature = "framework-dependent") {
+        DeploymentMode::FrameworkDependent
+    } else {
+        DeploymentMode::SelfContained
+    }
+}
 
 /// GitHub 镜像前缀（按顺序尝试）。
 ///
@@ -333,6 +375,11 @@ pub fn check_for_updates() -> UpdateCheckResult {
     let agent = build_agent();
     let mut last_error = "no update source available".to_string();
 
+    log::info!(
+        "Update check: current build is {:?}, checking latest release",
+        deployment_mode()
+    );
+
     for url in candidate_urls(&api_path) {
         match fetch_release(&agent, &url) {
             Ok(release) => return compare_release(release),
@@ -393,18 +440,20 @@ fn compare_release(release: GithubRelease) -> UpdateCheckResult {
         return UpdateCheckResult::UpToDate;
     }
 
-    // 找到匹配的安装包 asset
-    let installer = release
-        .assets
-        .iter()
-        .find(|a| a.name.starts_with(INSTALLER_PATTERN) && a.name.ends_with("-x64.exe"));
+    // 只认当前部署模式那一条线的安装包：自包含实例绝不下载框架依赖包，
+    // 反之亦然。这样两条更新路径完全独立。
+    let mode = deployment_mode();
+    let installer = find_installer_asset(&release.assets, &mode_tag_version(&release), mode);
 
     let installer = match installer {
         Some(a) => a,
         None => {
-            return UpdateCheckResult::Failed(
-                "no installer asset found in latest release".to_string(),
-            )
+            return UpdateCheckResult::Failed(format!(
+                "no installer asset for {:?} build in latest release (expected '{}*{}')",
+                mode,
+                INSTALLER_PATTERN,
+                mode.installer_suffix()
+            ))
         }
     };
 
@@ -413,6 +462,39 @@ fn compare_release(release: GithubRelease) -> UpdateCheckResult {
         download_url: installer.browser_download_url.clone(),
         release_notes: release.body.unwrap_or_default(),
         file_size: installer.size,
+    }
+}
+
+/// 在 release 的资产列表里挑出属于指定部署模式的安装包。
+///
+/// 先按「前缀 + 版本号 + 模式后缀」精确匹配；匹配不到再退化成
+/// 「前缀 + 模式后缀」，容忍资产名里的版本写法与 tag 不一致。
+fn find_installer_asset<'a>(
+    assets: &'a [GithubAsset],
+    version: &str,
+    mode: DeploymentMode,
+) -> Option<&'a GithubAsset> {
+    let suffix = mode.installer_suffix();
+
+    let exact = format!("{INSTALLER_PATTERN}{version}{suffix}");
+    if let Some(a) = assets.iter().find(|a| a.name == exact) {
+        return Some(a);
+    }
+
+    assets
+        .iter()
+        .find(|a| a.name.starts_with(INSTALLER_PATTERN) && a.name.ends_with(suffix))
+}
+
+/// 从 release tag 取出用于匹配资产名的版本号（去掉 v/V 前缀）。
+fn mode_tag_version(release: &GithubRelease) -> String {
+    let tag = release
+        .tag_name
+        .trim_start_matches('v')
+        .trim_start_matches('V');
+    match Version::parse(tag) {
+        Ok(v) => v.to_string(),
+        Err(_) => tag.to_string(),
     }
 }
 
@@ -595,6 +677,66 @@ pub fn cleanup_old_installers() {
 mod tests {
     use super::*;
 
+    /// 两个部署模式的安装包必须各选各的，互不串台。
+    #[test]
+    fn picks_installer_per_deployment_mode() {
+        let assets = vec![
+            GithubAsset {
+                name: "AudioRouter-Setup-0.4.0-x64.exe".to_string(),
+                browser_download_url: "https://example.com/sc.exe".to_string(),
+                size: 10,
+            },
+            GithubAsset {
+                name: "AudioRouter-Setup-0.4.0-x64-fd.exe".to_string(),
+                browser_download_url: "https://example.com/fd.exe".to_string(),
+                size: 20,
+            },
+        ];
+
+        let sc = find_installer_asset(&assets, "0.4.0", DeploymentMode::SelfContained).unwrap();
+        assert_eq!(sc.browser_download_url, "https://example.com/sc.exe");
+
+        let fd =
+            find_installer_asset(&assets, "0.4.0", DeploymentMode::FrameworkDependent).unwrap();
+        assert_eq!(fd.browser_download_url, "https://example.com/fd.exe");
+    }
+
+    /// 精确匹配优先：版本号不同的同名后缀资产不能被误选。
+    #[test]
+    fn prefers_exact_version_match() {
+        let assets = vec![
+            GithubAsset {
+                name: "AudioRouter-Setup-0.3.9-x64-fd.exe".to_string(),
+                browser_download_url: "https://example.com/old.exe".to_string(),
+                size: 10,
+            },
+            GithubAsset {
+                name: "AudioRouter-Setup-0.4.0-x64-fd.exe".to_string(),
+                browser_download_url: "https://example.com/new.exe".to_string(),
+                size: 20,
+            },
+        ];
+
+        let fd =
+            find_installer_asset(&assets, "0.4.0", DeploymentMode::FrameworkDependent).unwrap();
+        assert_eq!(fd.browser_download_url, "https://example.com/new.exe");
+    }
+
+    /// 只发了另一种模式的资产时，应视为「本模式没有更新包」而不是
+    /// 静默去下载别人的包。
+    #[test]
+    fn other_mode_asset_is_not_used() {
+        let assets = vec![GithubAsset {
+            name: "AudioRouter-Setup-0.4.0-x64.exe".to_string(),
+            browser_download_url: "https://example.com/sc.exe".to_string(),
+            size: 10,
+        }];
+
+        assert!(
+            find_installer_asset(&assets, "0.4.0", DeploymentMode::FrameworkDependent).is_none()
+        );
+    }
+
     /// 真实下载链路验证：需要联网，默认跳过。
     ///
     /// 跑法：`cargo test -p audiorouter --bin AudioRouter -- --ignored`
@@ -620,11 +762,9 @@ mod tests {
         }
         let release = latest.expect("failed to fetch the latest release");
 
-        let installer = release
-            .assets
-            .iter()
-            .find(|a| a.name.starts_with(INSTALLER_PATTERN) && a.name.ends_with("-x64.exe"))
-            .expect("latest release carries no installer asset");
+        let mode = deployment_mode();
+        let installer = find_installer_asset(&release.assets, &mode_tag_version(&release), mode)
+            .expect("latest release carries no installer asset for this build");
         assert!(installer.size > 0, "installer asset reports zero size");
 
         let path = download_installer(&installer.browser_download_url, |_, _| {})
