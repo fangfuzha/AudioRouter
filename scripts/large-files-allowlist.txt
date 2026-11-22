@@ -1,0 +1,6 @@
+# 大文件例外清单：每行一个相对仓库根的路径。
+# 登记在这里的文件不参与 scripts/check-large-files.ps1 的体积检查。
+# 原则上尽量少登记 —— 能压缩 / 能外链 / 能生成的就不要入库。
+#
+# 示例（当前为空）:
+# assets/some-large-model.bin

@@ -246,3 +246,11 @@
   restore/save 都要搬运 GB 级 target 目录（CI 里合计 97s/188s）。
 - **工具链版本要三处同步**：`rust-toolchain.toml` + 两个 workflow 里的
   `toolchain:` 输入。缓存键包含 rustc 版本，只在一处改会让所有缓存失效。
+- **不许提交大文件（> 1MB）。** `scripts/check-large-files.ps1` 会检查
+  Git 关心的全部文件（已跟踪 + 未跟踪未忽略），超限即报错退出 1：
+  - `ci.yml` 的 `size-guard` job 在每次 push / PR 上阻断；
+  - `release-windows.yml` 在 checkout 之后同样挡一次 —— tag 推送不触发
+    CI，发版路径不能有漏网之鱼。
+  - 确需入库的大资源登记在 `scripts/large-files-allowlist.txt`（每行一个
+    路径），登记前先想清楚能不能压缩 / 外链 / 改成构建期生成。
+  - 阈值目前 1MB；仓库现存最大文件是 `assets/icon.png`（约 127KB）。

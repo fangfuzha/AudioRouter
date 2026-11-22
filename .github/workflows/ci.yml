@@ -29,6 +29,26 @@ env:
   CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
+  # 大文件阻断：防止把构建产物、安装包、录屏之类的大文件提交进仓库。
+  # 独立成一个 job —— 它只需要 checkout，不需要 Rust 工具链，
+  # 几十秒就能出结论，坏提交不用等编译。
+  size-guard:
+    name: large file guard
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for large files
+        shell: pwsh
+        run: |
+          .\scripts\check-large-files.ps1 -MaxSizeKB 1024
+          if ($LASTEXITCODE -ne 0) {
+            echo "::error::仓库里存在超过 1MB 的文件。确需入库请在 scripts/large-files-allowlist.txt 登记例外。"
+            exit 1
+          }
+
   # lint 与 test 拆成两个并行 job：两者的依赖编译产物不共享，串行跑等于
   # 把两轮编译时间相加，并行后墙钟时间取两者的最大值。
   lint:

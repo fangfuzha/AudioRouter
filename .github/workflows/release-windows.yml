@@ -59,6 +59,18 @@ jobs:
           # 不需要拉全量历史
           fetch-depth: 1
 
+      # 发版前再挡一次大文件：CI 只覆盖 push 到 main 与 PR，
+      # tag 推送不触发 CI，所以这里独立检查一次，避免把带大文件的
+      # commit 直接发成 release。
+      - name: Check for large files
+        shell: pwsh
+        run: |
+          .\scripts\check-large-files.ps1 -MaxSizeKB 1024
+          if ($LASTEXITCODE -ne 0) {
+            echo "::error::仓库里存在超过 1MB 的文件，拒绝发布。"
+            exit 1
+          }
+
       - name: Resolve release tag
         id: resolve_tag
         shell: pwsh

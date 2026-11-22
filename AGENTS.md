@@ -77,6 +77,7 @@ For end-user docs see `README.md`; for short-term todos see `TODO.md`.
 - **最小化的窗口要用 `SW_RESTORE`**，`SW_SHOW` 对最小化窗口无效。
 - **列表子项必须带稳定 `with_key()`**，否则 reactor 按位置 diff 会错位。
 - **安装包的运行时文件绝不从 `target/` 拿**，必须按白名单从 nupkg/MSIX 抽取。
+- **不许提交大文件（> 1MB）**：`scripts/check-large-files.ps1` + CI `size-guard` job 双重阻断，例外登记在 `scripts/large-files-allowlist.txt`。
 - **WindowsAppRuntime 版本要四件套一起升**（见 [docs/packaging.md](docs/packaging.md)）。
 
 ## Validation Commands
